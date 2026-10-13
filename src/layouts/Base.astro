@@ -1,0 +1,44 @@
+---
+import '../styles/global.css';
+import { profile } from '../data/site';
+const { title = 'Research', description = profile.intro } = Astro.props;
+const path = Astro.url.pathname;
+const links = [['/','About'],['/research/','Research'],['/publications/','Publications'],['/projects/','Projects'],['/cv/','CV']];
+---
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content={description} />
+  <meta name="theme-color" content="#ffffff" />
+  <title>{title} — {profile.name}</title>
+</head>
+<body>
+  <div class="page-shell academic-shell">
+    <header class="topbar academic-topbar">
+      <a class="brand" href="/">{profile.name}</a>
+      <nav aria-label="Main navigation">{links.map(([href,label])=><a href={href} aria-current={path===href?'page':undefined}>{label}</a>)}</nav>
+    </header>
+    <div class="academic-columns">
+      <aside class="academic-sidebar" aria-label="Researcher profile">
+        <img class="profile-photo" src={profile.photo} alt={`Portrait of ${profile.name}`} width="175" height="175" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" /><div class="profile-photo-placeholder" style="display:none" aria-hidden="true">{profile.shortName}</div>
+        <h2>{profile.name}</h2>
+        <p class="sidebar-role">{profile.role}</p>
+        <p class="sidebar-affiliation">{profile.position}<br />{profile.affiliation}</p>
+        <p class="sidebar-location">⌖ {profile.location}</p>
+        <div class="sidebar-links">
+          {profile.email && <a href={`mailto:${profile.email}`}>Email ↗</a>}
+          {profile.github && <a href={profile.github} rel="me">GitHub ↗</a>}
+          {profile.linkedin && <a href={profile.linkedin} rel="me">LinkedIn ↗</a>}
+          {profile.scholar && <a href={profile.scholar} rel="me">Google Scholar ↗</a>}
+          <a href="/cv/">Curriculum Vitae ↗</a>
+        </div>
+
+      </aside>
+      <main class="academic-content"><slot /></main>
+    </div>
+    <footer class="footer"><span>© {new Date().getFullYear()} {profile.name}</span><span>Academic research portfolio</span></footer>
+  </div>
+</body>
+</html>

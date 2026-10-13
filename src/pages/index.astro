@@ -1,0 +1,24 @@
+---
+import Base from '../layouts/Base.astro';
+import { profile, projects, publications } from '../data/site';
+---
+<Base title="About">
+<section class="academic-intro">
+  <h1>About me</h1>
+  <p>{profile.intro}</p>
+  <p>I currently work at <strong>Lenovo AI Technology Center</strong>, focusing on shared AI infrastructure. Previously, I worked on accelerator and LLM systems at <strong>Huawei</strong>, and on distributed systems research at <strong>Ericsson Research</strong>. I earned my PhD in Computing Science from <strong>Umeå University</strong>.</p>
+  <p>My research combines systems design, implementation, and performance evaluation, from runtime and placement abstractions to data-transfer optimisation for model serving.</p>
+</section>
+<section class="academic-section">
+  <h2>Research interests</h2>
+  <ul class="plain-research-list"><li>LLM inference, model restoration, TTFT and runtime scheduling</li><li>Accelerator systems: GPU/NPU memory management and interconnect-aware transfers</li><li>Distributed runtimes, service placement and cloud-edge computing</li><li>Production AI infrastructure and GPU resource orchestration</li></ul>
+</section>
+<section class="academic-section">
+  <div class="academic-heading"><h2>Selected projects</h2><a href="/projects/">View all projects →</a></div>
+  {projects.map(project=><article class="academic-project"><h3><a href={`/projects/${project.slug}/`}>{project.title}</a></h3><p>{project.description}</p><a class="inline-action" href={`/projects/${project.slug}/`}>Research details →</a></article>)}
+</section>
+<section class="academic-section">
+  <div class="academic-heading"><h2>Selected publications</h2><a href="/publications/">Publications →</a></div>
+  {publications.length ? publications.slice(0,4).map(pub=><article class="academic-project"><h3>{pub.url ? <a href={pub.url} target="_blank" rel="noopener noreferrer">{pub.title} ↗</a> : pub.title}</h3><p>{pub.authors} · {pub.venue} · {pub.year}</p></article>) : <p>Verified publication records will be added here. See the <a href="/publications/">publications page</a>.</p>}
+</section>
+</Base>

@@ -1,0 +1,5 @@
+---
+import Base from '../layouts/Base.astro';
+import { publications } from '../data/site';
+---
+<Base title="Publications"><section class="page-title narrow"><div class="eyebrow">Publications</div><h1>Published research</h1><p class="lead">Peer-reviewed papers and other public scholarly outputs.</p></section><div class="narrow">{publications.length ? publications.map(pub=><article class="publication"><h3>{pub.url ? <a href={pub.url}>{pub.title} ↗</a> : pub.title}</h3><p>{pub.authors} · {pub.venue} · {pub.year}</p></article>) : <p class="notice">Publication entries are deliberately left blank. Add your verified titles, venues, dates and links to <code>src/data/site.ts</code>.</p>}</div></Base>

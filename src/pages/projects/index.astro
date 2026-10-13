@@ -1,0 +1,5 @@
+---
+import Base from '../../layouts/Base.astro';
+import { projects } from '../../data/site';
+---
+<Base title="Projects"><section class="page-title"><div class="eyebrow">Selected research</div><h1>Projects</h1><p class="lead">Research prototypes and systems engineering work, organised by problem, system design and evaluation.</p></section><div class="project-grid">{projects.map(p=><a class="project-card" href={`/projects/${p.slug}/`}><div class="number">{p.number}</div><div class="mini-label">{p.category}</div><h3>{p.title}</h3><p>{p.description}</p><span class="more">Read project ↗</span></a>)}</div></Base>
