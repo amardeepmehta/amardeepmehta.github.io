@@ -21,4 +21,38 @@ import { profile, projects, publications } from '../data/site';
   <div class="academic-heading"><h2>Selected publications</h2><a href="/publications/">Publications →</a></div>
   {publications.length ? publications.slice(0,4).map(pub=><article class="academic-project"><h3>{pub.url ? <a href={pub.url} target="_blank" rel="noopener noreferrer">{pub.title} ↗</a> : pub.title}</h3><p>{pub.authors} · {pub.venue} · {pub.year}</p></article>) : <p>Verified publication records will be added here. See the <a href="/publications/">publications page</a>.</p>}
 </section>
+
+<section class="academic-section">
+  <h2>Professional Service</h2>
+
+  <h3>Journal Reviewing</h3>
+
+  <p>
+    Reviewer,
+    <a
+      href="https://www.computer.org/digital-library/journals/td/2021-reviewer-thanks"
+      target="_blank"
+      rel="noopener noreferrer"
+    >
+      IEEE Transactions on Parallel and Distributed Systems
+      (TPDS)
+    </a>
+    — since 2021.
+  </p>
+
+  <h3>Conference Service</h3>
+
+  <p>
+    Session Chair, IEEE CLOUD 2022 —
+    Cloud Infrastructure.
+    <a
+      href="https://conferences.computer.org/cloud/2022/program/"
+      target="_blank"
+      rel="noopener noreferrer"
+    >
+      Conference Programme ↗
+    </a>
+  </p>
+</section>
+
 </Base>
