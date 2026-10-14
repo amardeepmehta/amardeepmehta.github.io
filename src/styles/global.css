@@ -14,3 +14,26 @@ a:hover{color:#245576}.academic-shell{max-width:1220px;padding:0 32px}.academic-
 
 .profile-photo{display:block;width:175px;height:175px;object-fit:cover;object-position:center 35%;border-radius:50%;margin:0 0 20px;border:1px solid var(--line)}
 @media(max-width:850px){.profile-photo{width:96px;height:96px;grid-row:span 3;margin:0}}
+/* Patent entries */
+.publication p {
+  margin: 5px 0;
+  line-height: 1.65;
+}
+
+.publication h3 a {
+  color: #326d91;
+}
+
+.publication h3 a:hover {
+  text-decoration: underline;
+}
+
+.patent-links {
+  font-size: 13px;
+  margin-top: 10px;
+}
+
+.patent-links a {
+  color: #326d91;
+  text-decoration: underline;
+}

@@ -1,0 +1,261 @@
+
+---
+import Base from '../layouts/Base.astro';
+import { patents } from '../data/patents';
+
+const granted = patents.filter(
+  (patent) => patent.status === 'Granted'
+);
+
+const applications = patents.filter(
+  (patent) => patent.status === 'Published application'
+);
+---
+
+<Base
+  title="Patents"
+  description="Patents and inventions by Amardeep Mehta in distributed systems, cloud infrastructure and wireless computing."
+>
+  <!-- Page heading -->
+  <section class="page-title narrow">
+    <div class="eyebrow">Research & Innovation</div>
+
+    <h1>Patents</h1>
+
+    <p class="lead">
+      Selected patented inventions and published patent
+      applications in distributed systems, cloud computing,
+      and communication infrastructure.
+    </p>
+  </section>
+
+  <div class="narrow">
+
+    <!-- Granted patents -->
+    <section class="patent-section">
+      <h2>Granted Patents</h2>
+
+      <p class="patent-section-intro">
+        Inventions with granted patent rights in at least
+        one jurisdiction.
+      </p>
+
+      {granted.map((patent) => (
+        <article class="publication patent-entry">
+
+          <h3>
+            <a
+              href={patent.url}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              {patent.title} ↗
+            </a>
+          </h3>
+
+          <p class="patent-inventors">
+            {patent.inventors}
+          </p>
+
+          <p class="patent-metadata">
+            <strong>{patent.primaryNumber}</strong>
+            {' · '}
+            {patent.date}
+            {' · '}
+            {patent.assignee}
+          </p>
+
+          <p class="patent-description">
+            {patent.description}
+          </p>
+
+          {patent.related.length > 0 && (
+            <div class="patent-related">
+              <span class="patent-related-label">
+                Related publications:
+              </span>
+
+              <div class="patent-related-links">
+                {patent.related.map((item) => (
+                  <a
+                    href={item.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    {item.label} ↗
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
+
+        </article>
+      ))}
+    </section>
+
+    <!-- Published patent applications -->
+    {applications.length > 0 && (
+      <section class="patent-section">
+
+        <h2>Published Patent Applications</h2>
+
+        <p class="patent-section-intro">
+          Publicly disclosed inventions for which a
+          granted patent is not listed here.
+        </p>
+
+        {applications.map((patent) => (
+          <article class="publication patent-entry">
+
+            <h3>
+              <a
+                href={patent.url}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                {patent.title} ↗
+              </a>
+            </h3>
+
+            <p class="patent-inventors">
+              {patent.inventors}
+            </p>
+
+            <p class="patent-metadata">
+              <strong>{patent.primaryNumber}</strong>
+              {' · '}
+              {patent.date}
+              {' · '}
+              {patent.assignee}
+            </p>
+
+            <p class="patent-description">
+              {patent.description}
+            </p>
+
+            {patent.related.length > 0 && (
+              <div class="patent-related">
+                <span class="patent-related-label">
+                  Related publications:
+                </span>
+
+                <div class="patent-related-links">
+                  {patent.related.map((item) => (
+                    <a
+                      href={item.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      {item.label} ↗
+                    </a>
+                  ))}
+                </div>
+              </div>
+            )}
+
+          </article>
+        ))}
+      </section>
+    )}
+
+    <!-- Explanatory note -->
+    <p class="patent-note">
+      Patent publications from different jurisdictions
+      belonging to the same invention are grouped together.
+      Patent rights and application status may vary
+      by jurisdiction.
+    </p>
+
+  </div>
+</Base>
+
+<style>
+  .patent-section {
+    margin-bottom: 48px;
+  }
+
+  .patent-section h2 {
+    font-size: 24px;
+    margin-bottom: 8px;
+  }
+
+  .patent-section-intro {
+    font-size: 14px;
+    color: #69737c;
+    margin-bottom: 14px;
+  }
+
+  .patent-entry {
+    padding: 24px 0;
+  }
+
+  .patent-entry h3 {
+    font-size: 18px;
+    line-height: 1.45;
+    margin-bottom: 10px;
+  }
+
+  .patent-entry h3 a {
+    color: #326d91;
+    text-decoration: none;
+  }
+
+  .patent-entry h3 a:hover {
+    text-decoration: underline;
+  }
+
+  .patent-inventors {
+    font-size: 14px;
+    color: #48545d;
+    margin: 6px 0;
+  }
+
+  .patent-metadata {
+    font-size: 13px;
+    color: #65717a;
+    margin: 6px 0;
+  }
+
+  .patent-description {
+    font-size: 14px;
+    line-height: 1.75;
+    color: #505d65;
+    margin-top: 12px;
+  }
+
+  .patent-related {
+    margin-top: 14px;
+  }
+
+  .patent-related-label {
+    display: block;
+    font-size: 12px;
+    font-weight: 600;
+    color: #64727a;
+    margin-bottom: 8px;
+  }
+
+  .patent-related-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 16px;
+  }
+
+  .patent-related-links a {
+    font-size: 12px;
+    color: #326d91;
+    text-decoration: none;
+  }
+
+  .patent-related-links a:hover {
+    text-decoration: underline;
+  }
+
+  .patent-note {
+    border-top: 1px solid #e2e5e8;
+    padding-top: 18px;
+    font-size: 12px;
+    color: #77828a;
+    line-height: 1.7;
+  }
+</style>
