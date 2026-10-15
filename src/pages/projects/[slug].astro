@@ -33,30 +33,11 @@ const { project } = Astro.props;
   <p>On an eight-H200 system, the original engine reported approximately <strong>3.576× host-to-device</strong> and <strong>3.442× device-to-host</strong> throughput relative to the native reference under interleaved host-memory placement. These are <em>transfer microbenchmarks</em>, not model-serving TTFT figures.</p>
   <p class="caveat"><strong>Measurement qualification:</strong> the highest labelled eight-GPU host-to-device run used the target and five helpers for nonzero block assignment; GPUs 6 and 7 did not carry blocks. Do not interpret the figure as scaling uniformly across eight active paths. The topology, NUMA policy, test buffer sizes and scheduler revision should accompany any formal publication of this result.</p>
   <h2>Connection to model serving</h2>
-  <p>Earlier Ascend-based experiments combined safetensors-aware tensor layout, larger HBM allocations and lazy layer prefetch with multipath movement. The reported qualitative observation was that memory-layout techniques helped steady-state tokens-per-output-token latency (TPOT), while transfer parallelism improved restore/cold-start behaviour. A controlled CUDA/vLLM evaluation is needed before making the same causal claim on H200.</p>
-  <p>For related device-memory research, see <a href="/projects/ascend-tpot/">Ascend NPU Memory Optimization ↗</a>, which investigates steady-state decoding (TPOT) rather than model-restoration latency.</p>
+  <p>Transfer microbenchmarks isolate data-movement throughput. End-to-end model-serving experiments are needed to establish whether multipath can improve model-load, restore and first-token latency under realistic inference workloads and contention.</p>
   <h2>Next research question</h2>
   <p><strong>Deadline-aware multipath model restoration:</strong> Can a serving runtime restore weights before each layer is needed without disrupting latency for resident requests? Proposed experiments cover cold start, model switching, vLLM sleep/wake, tensor/pipeline parallel layouts, NUMA placement, competing inference workloads and both TTFT and TPOT.</p>
   <h2>Resources and reproducibility</h2><p>The CUDA/H200 benchmark figures above are preliminary research measurements, not a public benchmark release. The original benchmark scripts, topology logs, per-GPU assignments, baseline measurements and source repository have not been published here. They will be linked only after permission and reproducibility review.</p>
 
-</> : project.slug === 'ascend-tpot' ? <>
-  <h2>The problem</h2>
-  <p>Autoregressive LLM decoding repeatedly reads model weights and KV-cache data from accelerator memory. Even when the weights already reside in NPU high-bandwidth memory (HBM), the organization of tensor allocations and their underlying memory mappings can affect address-translation efficiency and memory-access latency. Loading many independently allocated tensors also complicates management of large contiguous memory regions.</p>
-  <h2>Core idea</h2>
-  <p>Earlier work explored combining <strong>safetensors-aware tensor merging</strong> with <strong>larger, huge-page-backed Ascend HBM allocations</strong> to improve the memory layout presented to the inference runtime, without changing model weights or numerical computation.</p>
-  <h2>Memory-layout approach</h2>
-  <ol>
-    <li><strong>Read model metadata:</strong> use safetensors tensor offsets, shapes and dtypes to plan storage placement.</li>
-    <li><strong>Group compatible weights:</strong> organize multiple tensors into larger allocation regions while retaining logical tensor boundaries and correct alignment.</li>
-    <li><strong>Allocate NPU storage:</strong> investigate Ascend HBM allocation using larger device-memory pages instead of many small independent mappings.</li>
-    <li><strong>Reconstruct tensor views:</strong> associate individual logical tensors with their offsets inside the merged storage.</li>
-    <li><strong>Serve and measure:</strong> run vLLM-Ascend inference and compare steady-state token-generation latency against the baseline.</li>
-  </ol>
-  <div class="path-steps"><span>Safetensors metadata</span><span>Tensor grouping</span><span>Large HBM allocations</span><span>Tensor views</span><span>NPU decoding</span></div>
-  <h2>How it complements multipath restoration</h2>
-  <p>Memory-layout optimization targets the <strong>steady-state decode path (TPOT)</strong>. My <a href="/projects/multipath/">Multipath GPU Transfer</a> work targets <strong>weight movement during model load or restoration</strong>, which may reduce cold-start and time-to-first-token (TTFT) latency. The two approaches address different bottlenecks and could be evaluated together without assuming that their benefits necessarily add linearly.</p>
-  <h2>Next evaluation</h2>
-  <p>A publishable study will include hardware and runtime versions, model and workload configurations, and controlled TPOT/ITL measurements comparing the baseline, tensor merging, huge-page allocation, and their combination.</p>
 </> : project.slug === 'nefele' ? <>
   <h2>The problem</h2><p>Traditional orchestration systems manage containers or services as deployment units, but applications often need a simpler abstraction: start processes anywhere in a cluster, communicate with them by stable identity and manage their lifecycles without handcrafting node-level plumbing.</p>
   <h2>Research idea</h2><p>Nefele explores a cluster-wide process runtime that combines placement, process creation, naming, messaging and supervision, while still allowing efficient local execution and access to underlying compute resources.</p>
