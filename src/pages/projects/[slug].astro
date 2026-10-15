@@ -40,11 +40,10 @@ const { project } = Astro.props;
   <h2>Resources and reproducibility</h2><p>The CUDA/H200 benchmark figures above are preliminary research measurements, not a public benchmark release. The original benchmark scripts, topology logs, per-GPU assignments, baseline measurements and source repository have not been published here. They will be linked only after permission and reproducibility review.</p>
 
 </> : project.slug === 'ascend-tpot' ? <>
-  <div class="notice"><strong>Research status.</strong> This is a technical summary of earlier Ascend/vLLM-Ascend experiments. The TPOT improvement was observed qualitatively; numerical results, source code and hardware-level causal attribution are not published here.</div>
   <h2>The problem</h2>
   <p>Autoregressive LLM decoding repeatedly reads model weights and KV-cache data from accelerator memory. Even when the weights already reside in NPU high-bandwidth memory (HBM), the organization of tensor allocations and their underlying memory mappings can affect address-translation efficiency and memory-access latency. Loading many independently allocated tensors also complicates management of large contiguous memory regions.</p>
   <h2>Core idea</h2>
-  <p>Investigate whether combining <strong>safetensors-aware tensor merging</strong> with <strong>larger, huge-page-backed Ascend HBM allocations</strong> can improve the memory layout presented to the inference runtime, without changing model weights or numerical computation.</p>
+  <p>Earlier work explored combining <strong>safetensors-aware tensor merging</strong> with <strong>larger, huge-page-backed Ascend HBM allocations</strong> to improve the memory layout presented to the inference runtime, without changing model weights or numerical computation.</p>
   <h2>Memory-layout approach</h2>
   <ol>
     <li><strong>Read model metadata:</strong> use safetensors tensor offsets, shapes and dtypes to plan storage placement.</li>
@@ -54,15 +53,10 @@ const { project } = Astro.props;
     <li><strong>Serve and measure:</strong> run vLLM-Ascend inference and compare steady-state token-generation latency against the baseline.</li>
   </ol>
   <div class="path-steps"><span>Safetensors metadata</span><span>Tensor grouping</span><span>Large HBM allocations</span><span>Tensor views</span><span>NPU decoding</span></div>
-  <h2>Experimental observation</h2>
-  <p>In earlier experiments, combining safetensors-aware weight organization and larger HBM pages was associated with a substantial improvement in <strong>time per output token (TPOT)</strong>. A controlled ablation is still needed to establish how much each component contributed. The site deliberately omits unpublished performance percentages and comparisons that cannot yet be reproduced from disclosed logs.</p>
-  <p class="caveat"><strong>Causal limitation:</strong> lower translation-lookaside-buffer (TLB) pressure is a hypothesis, not an established measurement here. Other possible effects include allocation granularity, layout, access locality and runtime configuration. Ascend NPU HBM huge pages should not be confused with Linux host-memory huge pages.</p>
   <h2>How it complements multipath restoration</h2>
   <p>Memory-layout optimization targets the <strong>steady-state decode path (TPOT)</strong>. My <a href="/projects/multipath/">Multipath GPU Transfer</a> work targets <strong>weight movement during model load or restoration</strong>, which may reduce cold-start and time-to-first-token (TTFT) latency. The two approaches address different bottlenecks and could be evaluated together without assuming that their benefits necessarily add linearly.</p>
   <h2>Next evaluation</h2>
-  <p>A publishable study should report hardware and runtime versions, model architecture and size, batch/concurrency, prompt and output lengths, HBM allocation settings, and steady-state TPOT/ITL distributions. The key ablation is baseline vs. merging only vs. huge-page allocation only vs. both, followed by checks for model correctness, memory overhead and concurrent serving. KV-cache placement and cross-platform evaluation on NVIDIA GPUs remain extensions to investigate, not demonstrated results on this page.</p>
-  <h2>Disclosure and reproducibility</h2>
-  <p>This summary describes the problem, explored design and qualitative observation without exposing internal implementation details. Source, benchmark logs and quantitative data should be linked only after permission and reproducibility review.</p>
+  <p>A publishable study will include hardware and runtime versions, model and workload configurations, and controlled TPOT/ITL measurements comparing the baseline, tensor merging, huge-page allocation, and their combination.</p>
 </> : project.slug === 'nefele' ? <>
   <h2>The problem</h2><p>Traditional orchestration systems manage containers or services as deployment units, but applications often need a simpler abstraction: start processes anywhere in a cluster, communicate with them by stable identity and manage their lifecycles without handcrafting node-level plumbing.</p>
   <h2>Research idea</h2><p>Nefele explores a cluster-wide process runtime that combines placement, process creation, naming, messaging and supervision, while still allowing efficient local execution and access to underlying compute resources.</p>
