@@ -1,0 +1,663 @@
+<p><em>An illustrated, worked technical reference for LLM inference — 21 October 2026.</em></p>
+<h1 id="reading-map">Reading map</h1>
+<p>This reference builds the concepts in dependency order: <strong>tokens → hidden states → the four learned attention matrices → projection and reshape → head-wise attention → causal masking → KV cache → prefill/decode → GQA → performance implications</strong>. Thirteen figures and several dimension-checked examples make each stage traceable. All numerical model dimensions are <em>illustrative configurations</em>, not claims about a specific checkpoint.</p>
+
+<p><strong>One-sentence summary:</strong> During autoregressive inference, the current Query selects information from Keys and Values for the current and preceding positions; a KV cache preserves the preceding K/V tensors so that future decode steps need not recompute them.</p>
+<h1 id="tokens-embeddings-and-hidden-states">Tokens, embeddings, and hidden states</h1>
+<h2 id="what-is-a-4096-dimensional-token-vector">What is a 4,096-dimensional token vector?</h2>
+<p>A tokenizer maps text into token IDs. An embedding lookup converts each token ID into a dense numerical representation. For a decoder with hidden size <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>d</mi><mrow><mi>m</mi><mi>o</mi><mi>d</mi><mi>e</mi><mi>l</mi></mrow></msub><mo>=</mo><mn>4096</mn></mrow><annotation encoding="application/x-tex">d_{model}=4096</annotation></semantics></math>, each token’s embedding and each layer’s hidden state have <strong>4,096 scalar components</strong>. These are learned coordinates, not one named human concept per coordinate.</p>
+<p>Imagine the input text <strong>“The cat sat”</strong> is represented as three tokens for this teaching example. Real tokenizers may split text differently.</p>
+<p>A toy four-dimensional version might be:</p>
+<table>
+<thead>
+<tr class="header">
+<th style="text-align: left;">Token</th>
+<th style="text-align: left;">Illustrative vector</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">The</td>
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mo stretchy="true" form="prefix">[</mo><mn>0.2</mn><mo>,</mo><mi>−</mi><mn>0.5</mn><mo>,</mo><mn>0.8</mn><mo>,</mo><mn>0.1</mn><mo stretchy="true" form="postfix">]</mo></mrow><annotation encoding="application/x-tex">[0.2,-0.5,0.8,0.1]</annotation></semantics></math></td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">cat</td>
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mo stretchy="true" form="prefix">[</mo><mn>0.9</mn><mo>,</mo><mn>0.3</mn><mo>,</mo><mi>−</mi><mn>0.2</mn><mo>,</mo><mn>0.7</mn><mo stretchy="true" form="postfix">]</mo></mrow><annotation encoding="application/x-tex">[0.9,0.3,-0.2,0.7]</annotation></semantics></math></td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">sat</td>
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mo stretchy="true" form="prefix">[</mo><mi>−</mi><mn>0.1</mn><mo>,</mo><mn>0.6</mn><mo>,</mo><mn>0.4</mn><mo>,</mo><mn>0.3</mn><mo stretchy="true" form="postfix">]</mo></mrow><annotation encoding="application/x-tex">[-0.1,0.6,0.4,0.3]</annotation></semantics></math></td>
+</tr>
+</tbody>
+</table>
+<p>For the actual <strong>4,096-dimensional</strong> example, we write the input hidden states as a matrix with one row per position:</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>X</mi><mo>=</mo><mrow><mo stretchy="true" form="prefix">[</mo><mtable><mtr><mtd columnalign="center" style="text-align: center"><msub><mi>x</mi><mn>1</mn></msub></mtd></mtr><mtr><mtd columnalign="center" style="text-align: center"><msub><mi>x</mi><mn>2</mn></msub></mtd></mtr><mtr><mtd columnalign="center" style="text-align: center"><msub><mi>x</mi><mn>3</mn></msub></mtd></mtr></mtable><mo stretchy="true" form="postfix">]</mo></mrow><mo>∈</mo><msup><mi>ℝ</mi><mrow><mn>3</mn><mo>×</mo><mn>4096</mn></mrow></msup><mi>.</mi></mrow><annotation encoding="application/x-tex">X=\begin{bmatrix}x_1\\x_2\\x_3\end{bmatrix}\in\mathbb{R}^{3\times4096}. </annotation></semantics></math></p>
+<p>The first layer receives embedding-based representations, while later layers receive the preceding layer’s transformed hidden states. The hidden size is <strong>not</strong> the number of tokens, the number of attention heads, or the KV-cache size.</p>
+<h1 id="the-role-of-attention-within-one-transformer-layer">The role of attention within one transformer layer</h1>
+<p>A simplified pre-normalized decoder layer consists of: (1) normalization; (2) linear Q/K/V projections; (3) causal self-attention and output projection; (4) residual addition; (5) a feed-forward network (MLP) with normalization and residual addition. Implementations vary in the ordering and specifics of these suboperations.</p>
+<figure>
+<img src="/notes/attention-kv-cache-gqa/figures/01_transformer_layer.png" alt="Figure 1. Conceptual dataflow of a decoder transformer layer and its per-layer KV cache." />
+<figcaption aria-hidden="true">Figure 1. Conceptual dataflow of a decoder transformer layer and its per-layer KV cache.</figcaption>
+</figure>
+<p><em>Figure 1. Conceptual dataflow of a decoder transformer layer and its per-layer KV cache.</em> <strong>Attention answers:</strong> “For the current token position, which accessible token positions contain useful information, and how should it be combined?” A Query identifies what the position seeks; Keys determine matching scores; Values contain information that is aggregated. These roles are learned numerical operations, not literal questions and answers.</p>
+<h2 id="q-k-and-v-are-linear-projections">Q, K, and V are linear projections</h2>
+<p>For a sequence of hidden states <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>X</mi><annotation encoding="application/x-tex">X</annotation></semantics></math>, a layer computes:</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>Q</mi><mo>=</mo><mi>X</mi><msub><mi>W</mi><mi>Q</mi></msub><mo>,</mo><mspace width="2.0em"></mspace><mi>K</mi><mo>=</mo><mi>X</mi><msub><mi>W</mi><mi>K</mi></msub><mo>,</mo><mspace width="2.0em"></mspace><mi>V</mi><mo>=</mo><mi>X</mi><msub><mi>W</mi><mi>V</mi></msub><mi>.</mi></mrow><annotation encoding="application/x-tex">Q=XW_Q,\qquad K=XW_K,\qquad V=XW_V.</annotation></semantics></math></p>
+<p>The matrices <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>W</mi><mi>Q</mi></msub><mo>,</mo><msub><mi>W</mi><mi>K</mi></msub><mo>,</mo><msub><mi>W</mi><mi>V</mi></msub></mrow><annotation encoding="application/x-tex">W_Q,W_K,W_V</annotation></semantics></math> are model parameters learned during training. <strong>They are not the KV cache.</strong> The projected K and V activations, for actual tokens and positions, become cache entries.</p>
+<p>We will use this internally consistent <strong>GQA configuration</strong> throughout:</p>
+<table>
+<thead>
+<tr class="header">
+<th style="text-align: left;">Parameter</th>
+<th style="text-align: left;">Symbol</th>
+<th style="text-align: right;">Value</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">Number of prompt tokens</td>
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>S</mi><annotation encoding="application/x-tex">S</annotation></semantics></math></td>
+<td style="text-align: right;">3 initially</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">Hidden-state dimension</td>
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>d</mi><mrow><mi>m</mi><mi>o</mi><mi>d</mi><mi>e</mi><mi>l</mi></mrow></msub><annotation encoding="application/x-tex">d_{model}</annotation></semantics></math></td>
+<td style="text-align: right;">4,096</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">Query heads</td>
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>H</mi><mi>Q</mi></msub><annotation encoding="application/x-tex">H_Q</annotation></semantics></math></td>
+<td style="text-align: right;">32</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">KV heads</td>
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>H</mi><mrow><mi>K</mi><mi>V</mi></mrow></msub><annotation encoding="application/x-tex">H_{KV}</annotation></semantics></math></td>
+<td style="text-align: right;">8</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">Dimension per head</td>
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>D</mi><annotation encoding="application/x-tex">D</annotation></semantics></math></td>
+<td style="text-align: right;">128</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">Transformer layers</td>
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>L</mi><annotation encoding="application/x-tex">L</annotation></semantics></math></td>
+<td style="text-align: right;">32</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">KV precision</td>
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>P</mi><annotation encoding="application/x-tex">P</annotation></semantics></math></td>
+<td style="text-align: right;">2 bytes (BF16)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="full-projection-shapes-versus-a-single-head">Full projection shapes versus a single head</h2>
+<p>With three tokens, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>X</mi><annotation encoding="application/x-tex">X</annotation></semantics></math> has shape <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>3</mn><mo>×</mo><mn>4096</mn></mrow><annotation encoding="application/x-tex">3\times4096</annotation></semantics></math>. For the configuration above:</p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th style="text-align: left;">Operation</th>
+<th style="text-align: left;">Weight shape</th>
+<th style="text-align: left;">Entire projected result</th>
+<th style="text-align: left;">Reshape for attention</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>Q</mi><mo>=</mo><mi>X</mi><msub><mi>W</mi><mi>Q</mi></msub></mrow><annotation encoding="application/x-tex">Q=XW_Q</annotation></semantics></math></td>
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>4096</mn><mo>×</mo><mn>4096</mn></mrow><annotation encoding="application/x-tex">4096\times4096</annotation></semantics></math></td>
+<td style="text-align: left;"><strong><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>3</mn><mo>×</mo><mn>4096</mn></mrow><annotation encoding="application/x-tex">3\times4096</annotation></semantics></math></strong></td>
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>3</mn><mo>×</mo><mn>32</mn><mo>×</mo><mn>128</mn></mrow><annotation encoding="application/x-tex">3\times32\times128</annotation></semantics></math></td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>K</mi><mo>=</mo><mi>X</mi><msub><mi>W</mi><mi>K</mi></msub></mrow><annotation encoding="application/x-tex">K=XW_K</annotation></semantics></math></td>
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>4096</mn><mo>×</mo><mn>1024</mn></mrow><annotation encoding="application/x-tex">4096\times1024</annotation></semantics></math></td>
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>3</mn><mo>×</mo><mn>1024</mn></mrow><annotation encoding="application/x-tex">3\times1024</annotation></semantics></math></td>
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>3</mn><mo>×</mo><mn>8</mn><mo>×</mo><mn>128</mn></mrow><annotation encoding="application/x-tex">3\times8\times128</annotation></semantics></math></td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>V</mi><mo>=</mo><mi>X</mi><msub><mi>W</mi><mi>V</mi></msub></mrow><annotation encoding="application/x-tex">V=XW_V</annotation></semantics></math></td>
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>4096</mn><mo>×</mo><mn>1024</mn></mrow><annotation encoding="application/x-tex">4096\times1024</annotation></semantics></math></td>
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>3</mn><mo>×</mo><mn>1024</mn></mrow><annotation encoding="application/x-tex">3\times1024</annotation></semantics></math></td>
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>3</mn><mo>×</mo><mn>8</mn><mo>×</mo><mn>128</mn></mrow><annotation encoding="application/x-tex">3\times8\times128</annotation></semantics></math></td>
+</tr>
+</tbody>
+</table>
+<figure>
+<img src="/notes/attention-kv-cache-gqa/figures/02_qkv_shapes.png" alt="Figure 2. The three projections act independently on the same hidden-state matrix." />
+<figcaption aria-hidden="true">Figure 2. The three projections act independently on the same hidden-state matrix.</figcaption>
+</figure>
+<p><em>Figure 2. The three projections act independently on the same hidden-state matrix.</em> <strong>Common point of confusion:</strong> <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>Q</mi><mo>=</mo><mi>X</mi><msub><mi>W</mi><mi>Q</mi></msub></mrow><annotation encoding="application/x-tex">Q=XW_Q</annotation></semantics></math> is indeed <strong><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>3</mn><mo>×</mo><mn>4096</mn></mrow><annotation encoding="application/x-tex">3\times4096</annotation></semantics></math></strong>, <em>not</em> <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>3</mn><mo>×</mo><mn>128</mn></mrow><annotation encoding="application/x-tex">3\times128</annotation></semantics></math>. The latter is the <strong>slice for a single Query head</strong> after reshaping the complete projected Query tensor. Likewise, one K or V head is <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>3</mn><mo>×</mo><mn>128</mn></mrow><annotation encoding="application/x-tex">3\times128</annotation></semantics></math>; the <strong>complete</strong> K tensor spans eight such KV heads.</p>
+<p>In GQA, four Query heads use one shared KV head, since <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>H</mi><mi>Q</mi></msub><mi>/</mi><msub><mi>H</mi><mrow><mi>K</mi><mi>V</mi></mrow></msub><mo>=</mo><mn>32</mn><mi>/</mi><mn>8</mn><mo>=</mo><mn>4</mn></mrow><annotation encoding="application/x-tex">H_Q/H_{KV}=32/8=4</annotation></semantics></math>. Each Query head remains independent, so it produces different attention weights even when its K/V are shared.</p>
+<h2 id="the-four-learned-attention-weight-matrices-wq-wk-wv-wo">The four learned attention weight matrices (WQ, WK, WV, WO)</h2>
+<p>There are <strong>four learned projection matrices per standard attention module</strong>, each with a different role. They are matrices, <em>not metrics</em>. <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>W</mi><mi>Q</mi></msub><mo>,</mo><msub><mi>W</mi><mi>K</mi></msub><mo>,</mo><msub><mi>W</mi><mi>V</mi></msub></mrow><annotation encoding="application/x-tex">W_Q,W_K,W_V</annotation></semantics></math> project the same input hidden states in <strong>parallel</strong>; <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>W</mi><mi>O</mi></msub><annotation encoding="application/x-tex">W_O</annotation></semantics></math> combines the outputs of the Query heads <strong>after</strong> attention.</p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th style="text-align: left;">Matrix</th>
+<th style="text-align: left;">Purpose</th>
+<th style="text-align: left;">Shape in 32-Q / 8-KV GQA</th>
+<th style="text-align: right;">Parameters</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>W</mi><mi>Q</mi></msub><annotation encoding="application/x-tex">W_Q</annotation></semantics></math></td>
+<td style="text-align: left;">Produce all Query features</td>
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>4096</mn><mo>×</mo><mn>4096</mn></mrow><annotation encoding="application/x-tex">4096\times4096</annotation></semantics></math></td>
+<td style="text-align: right;">16,777,216</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>W</mi><mi>K</mi></msub><annotation encoding="application/x-tex">W_K</annotation></semantics></math></td>
+<td style="text-align: left;">Produce all Key features</td>
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>4096</mn><mo>×</mo><mn>1024</mn></mrow><annotation encoding="application/x-tex">4096\times1024</annotation></semantics></math></td>
+<td style="text-align: right;">4,194,304</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>W</mi><mi>V</mi></msub><annotation encoding="application/x-tex">W_V</annotation></semantics></math></td>
+<td style="text-align: left;">Produce all Value features</td>
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>4096</mn><mo>×</mo><mn>1024</mn></mrow><annotation encoding="application/x-tex">4096\times1024</annotation></semantics></math></td>
+<td style="text-align: right;">4,194,304</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>W</mi><mi>O</mi></msub><annotation encoding="application/x-tex">W_O</annotation></semantics></math></td>
+<td style="text-align: left;">Mix concatenated per-Query-head outputs</td>
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>4096</mn><mo>×</mo><mn>4096</mn></mrow><annotation encoding="application/x-tex">4096\times4096</annotation></semantics></math></td>
+<td style="text-align: right;">16,777,216</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"><strong>Total</strong></td>
+<td style="text-align: left;"><strong>Attention projections only</strong></td>
+<td style="text-align: left;"></td>
+<td style="text-align: right;"><strong>41,943,040</strong></td>
+</tr>
+</tbody>
+</table>
+<figure>
+<img src="/notes/attention-kv-cache-gqa/figures/03_four_weight_matrices.png" alt="Figure 3. How WQ, WK, WV, and WO work together within one attention module." />
+<figcaption aria-hidden="true">Figure 3. How WQ, WK, WV, and WO work together within one attention module.</figcaption>
+</figure>
+<p><em>Figure 3. How WQ, WK, WV, and WO work together within one attention module.</em> These numbers omit optional biases and do not include MLP, embeddings, or normalization weights. Every transformer layer has its <strong>own</strong> attention projection matrices. Weights are fixed during ordinary inference, while <strong>K/V cache entries are generated for the actual token sequence</strong>. The model reuses <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>W</mi><mi>K</mi></msub><annotation encoding="application/x-tex">W_K</annotation></semantics></math> to compute a new <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>K</mi><mi>t</mi></msub><annotation encoding="application/x-tex">K_t</annotation></semantics></math> for each token; it does not store the matrix <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>W</mi><mi>K</mi></msub><annotation encoding="application/x-tex">W_K</annotation></semantics></math> <em>inside</em> the KV cache.</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th style="text-align: left;">Aspect</th>
+<th style="text-align: left;">Model weight matrices</th>
+<th style="text-align: left;">KV cache</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">Contents</td>
+<td style="text-align: left;">Learned parameters such as <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>W</mi><mi>Q</mi></msub><mo>,</mo><msub><mi>W</mi><mi>K</mi></msub><mo>,</mo><msub><mi>W</mi><mi>V</mi></msub><mo>,</mo><msub><mi>W</mi><mi>O</mi></msub></mrow><annotation encoding="application/x-tex">W_Q,W_K,W_V,W_O</annotation></semantics></math></td>
+<td style="text-align: left;">Computed <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>K</mi><mi>i</mi></msub><mo>,</mo><msub><mi>V</mi><mi>i</mi></msub></mrow><annotation encoding="application/x-tex">K_i,V_i</annotation></semantics></math> for each sequence and layer</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">Lifetime</td>
+<td style="text-align: left;">Same model weights across ordinary inference requests</td>
+<td style="text-align: left;">Request-/prefix-specific runtime state</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">Updated per token?</td>
+<td style="text-align: left;">No</td>
+<td style="text-align: left;">Yes: append current <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>K</mi><mi>t</mi></msub><mo>,</mo><msub><mi>V</mi><mi>t</mi></msub></mrow><annotation encoding="application/x-tex">K_t,V_t</annotation></semantics></math></td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">Memory scaling</td>
+<td style="text-align: left;">Depends on model architecture</td>
+<td style="text-align: left;">Grows with cached token count and concurrency</td>
+</tr>
+</tbody>
+</table>
+<h2 id="why-reshape-the-projected-tensor-into-separate-heads">Why reshape the projected tensor into separate heads?</h2>
+<p>The complete Query projection has <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>3</mn><mo>×</mo><mn>4096</mn></mrow><annotation encoding="application/x-tex">3\times4096</annotation></semantics></math> values, but attention is calculated <strong>independently for 32 Query heads</strong>. After projection:</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>Q</mi><mo>:</mo><mrow><mo stretchy="true" form="prefix">(</mo><mn>3</mn><mo>,</mo><mn>4096</mn><mo stretchy="true" form="postfix">)</mo></mrow><mover><mo>→</mo><mtext mathvariant="normal">reshape</mtext></mover><mrow><mo stretchy="true" form="prefix">(</mo><mn>3</mn><mo>,</mo><mn>32</mn><mo>,</mo><mn>128</mn><mo stretchy="true" form="postfix">)</mo></mrow><mi>.</mi></mrow><annotation encoding="application/x-tex">Q:(3,4096)\xrightarrow{\text{reshape}}(3,32,128).</annotation></semantics></math></p>
+<p>For one token, dimensions 1–128 of its projected Query form head 1; 129–256 form head 2; and so on. Each head’s slice contains 128 values. Corresponding K/V projections reshape as:</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>K</mi><mo>,</mo><mi>V</mi><mo>:</mo><mrow><mo stretchy="true" form="prefix">(</mo><mn>3</mn><mo>,</mo><mn>1024</mn><mo stretchy="true" form="postfix">)</mo></mrow><mover><mo>→</mo><mtext mathvariant="normal">reshape</mtext></mover><mrow><mo stretchy="true" form="prefix">(</mo><mn>3</mn><mo>,</mo><mn>8</mn><mo>,</mo><mn>128</mn><mo stretchy="true" form="postfix">)</mo></mrow><mi>.</mi></mrow><annotation encoding="application/x-tex">K,V:(3,1024)\xrightarrow{\text{reshape}}(3,8,128).</annotation></semantics></math></p>
+<figure>
+<img src="/notes/attention-kv-cache-gqa/figures/04_reshape_attention_heads.png" alt="Figure 4. The complete Query vector is partitioned into head-specific slices; GQA uses fewer K and V heads." />
+<figcaption aria-hidden="true">Figure 4. The complete Query vector is partitioned into head-specific slices; GQA uses fewer K and V heads.</figcaption>
+</figure>
+<p><em>Figure 4. The complete Query vector is partitioned into head-specific slices; GQA uses fewer K and V heads.</em> <strong>Why do this?</strong> Each Query head must produce its <strong>own softmax attention-weight distribution</strong>. One 4,096-dimensional attention head would produce just one score matrix/softmax per sequence; 32 independent 128-dimensional heads produce <strong>32 different attention-weight matrices</strong>. A later output projection can mix what these heads learn. The projections’ learned columns create different head-specific features; reshape just reorganizes those features. It does <strong>not</strong> change any scalar values or compress the tensor.</p>
+<p>The projection could equivalently be implemented as 32 smaller matrices <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msubsup><mi>W</mi><mi>Q</mi><mrow><mo stretchy="true" form="prefix">(</mo><mi>h</mi><mo stretchy="true" form="postfix">)</mo></mrow></msubsup><mo>∈</mo><msup><mi>ℝ</mi><mrow><mn>4096</mn><mo>×</mo><mn>128</mn></mrow></msup></mrow><annotation encoding="application/x-tex">W_Q^{(h)}\in\mathbb{R}^{4096\times128}</annotation></semantics></math>, then stacked. Computing one large <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>X</mi><msub><mi>W</mi><mi>Q</mi></msub></mrow><annotation encoding="application/x-tex">XW_Q</annotation></semantics></math> and reshaping is a convenient equivalent implementation. Attention runtimes commonly transpose to a head-first tensor layout <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mo stretchy="true" form="prefix">[</mo><mi>B</mi><mo>,</mo><mi>H</mi><mo>,</mo><mi>S</mi><mo>,</mo><mi>D</mi><mo stretchy="true" form="postfix">]</mo></mrow><annotation encoding="application/x-tex">[B,H,S,D]</annotation></semantics></math> for parallel head-wise kernels; this transpose is a layout operation too.</p>
+<h2 id="end-to-end-attention-formula-and-shapes-for-gqa">End-to-end attention formula and shapes for GQA</h2>
+<p>For Query head <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>h</mi><annotation encoding="application/x-tex">h</annotation></semantics></math>, let <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>g</mi><mrow><mo stretchy="true" form="prefix">(</mo><mi>h</mi><mo stretchy="true" form="postfix">)</mo></mrow></mrow><annotation encoding="application/x-tex">g(h)</annotation></semantics></math> be its assigned KV head. For zero-indexed heads in this example, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>g</mi><mrow><mo stretchy="true" form="prefix">(</mo><mi>h</mi><mo stretchy="true" form="postfix">)</mo></mrow><mo>=</mo><mo stretchy="false" form="prefix">⌊</mo><mi>h</mi><mi>/</mi><mn>4</mn><mo stretchy="false" form="postfix">⌋</mo></mrow><annotation encoding="application/x-tex">g(h)=\lfloor h/4\rfloor</annotation></semantics></math> because <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>32</mn><mi>/</mi><mn>8</mn><mo>=</mo><mn>4</mn></mrow><annotation encoding="application/x-tex">32/8=4</annotation></semantics></math> Query heads share each KV head. Then:</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><menclose notation="box"><mrow><msub><mi>O</mi><mi>h</mi></msub><mo>=</mo><mo>softmax</mo><mrow><mo stretchy="true" form="prefix">(</mo><mfrac><mrow><msub><mi>Q</mi><mi>h</mi></msub><msubsup><mi>K</mi><mrow><mi>g</mi><mrow><mo stretchy="true" form="prefix">(</mo><mi>h</mi><mo stretchy="true" form="postfix">)</mo></mrow></mrow><mi>⊤</mi></msubsup></mrow><msqrt><mn>128</mn></msqrt></mfrac><mo>+</mo><mi>M</mi><mo stretchy="true" form="postfix">)</mo></mrow><msub><mi>V</mi><mrow><mi>g</mi><mrow><mo stretchy="true" form="prefix">(</mo><mi>h</mi><mo stretchy="true" form="postfix">)</mo></mrow></mrow></msub></mrow></menclose><annotation encoding="application/x-tex">\boxed{O_h=\operatorname{softmax}\left(\frac{Q_hK_{g(h)}^\top}{\sqrt{128}}+M\right)V_{g(h)}}</annotation></semantics></math></p>
+<p>All 32 outputs have shape <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>3</mn><mo>×</mo><mn>128</mn></mrow><annotation encoding="application/x-tex">3\times128</annotation></semantics></math>. They are concatenated and projected:</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><menclose notation="box"><mrow><mi>Y</mi><mo>=</mo><mo>Concat</mo><mrow><mo stretchy="true" form="prefix">(</mo><msub><mi>O</mi><mn>1</mn></msub><mo>,</mo><mi>…</mi><mo>,</mo><msub><mi>O</mi><mn>32</mn></msub><mo stretchy="true" form="postfix">)</mo></mrow><msub><mi>W</mi><mi>O</mi></msub></mrow></menclose><annotation encoding="application/x-tex">\boxed{Y=\operatorname{Concat}(O_1,\ldots,O_{32})W_O}</annotation></semantics></math></p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><munder><munder><mrow><mo stretchy="true" form="prefix">(</mo><mn>3</mn><mo>,</mo><mn>32</mn><mo>,</mo><mn>128</mn><mo stretchy="true" form="postfix">)</mo></mrow><mo accent="true">⏟</mo></munder><mtext mathvariant="normal">head outputs</mtext></munder><mo>→</mo><munder><munder><mrow><mo stretchy="true" form="prefix">(</mo><mn>3</mn><mo>,</mo><mn>4096</mn><mo stretchy="true" form="postfix">)</mo></mrow><mo accent="true">⏟</mo></munder><mtext mathvariant="normal">concatenated</mtext></munder><mspace width="0.278em"></mspace><munder><munder><mrow><mo stretchy="true" form="prefix">(</mo><mn>4096</mn><mo>,</mo><mn>4096</mn><mo stretchy="true" form="postfix">)</mo></mrow><mo accent="true">⏟</mo></munder><msub><mi>W</mi><mi>O</mi></msub></munder><mo>→</mo><munder><munder><mrow><mo stretchy="true" form="prefix">(</mo><mn>3</mn><mo>,</mo><mn>4096</mn><mo stretchy="true" form="postfix">)</mo></mrow><mo accent="true">⏟</mo></munder><mi>Y</mi></munder><mi>.</mi></mrow><annotation encoding="application/x-tex">\underbrace{(3,32,128)}_{\text{head outputs}}\longrightarrow\underbrace{(3,4096)}_{\text{concatenated}}\;\underbrace{(4096,4096)}_{W_O}\longrightarrow\underbrace{(3,4096)}_{Y}.</annotation></semantics></math></p>
+<p>Thus the full output has the same model width as the input and can be added to the residual stream. <strong>Q/K/V projection, reshape, per-head attention, concatenation, and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>W</mi><mi>O</mi></msub><annotation encoding="application/x-tex">W_O</annotation></semantics></math> together constitute the attention module</strong>; the layer also includes normalization, residual connections, and an MLP.</p>
+<h1 id="scaled-dot-product-causal-attention">Scaled dot-product causal attention</h1>
+<p>For <strong>one Query head</strong>, the general scaled dot-product attention equation is:</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><menclose notation="box"><mrow><mo>Attention</mo><mrow><mo stretchy="true" form="prefix">(</mo><mi>Q</mi><mo>,</mo><mi>K</mi><mo>,</mo><mi>V</mi><mo stretchy="true" form="postfix">)</mo></mrow><mo>=</mo><mo>softmax</mo><mrow><mo stretchy="true" form="prefix">(</mo><mfrac><mrow><mi>Q</mi><msup><mi>K</mi><mi>⊤</mi></msup></mrow><msqrt><mi>D</mi></msqrt></mfrac><mo>+</mo><mi>M</mi><mo stretchy="true" form="postfix">)</mo></mrow><mi>V</mi></mrow></menclose><annotation encoding="application/x-tex">\boxed{\operatorname{Attention}(Q,K,V)=\operatorname{softmax}\left(\frac{QK^\top}{\sqrt D}+M\right)V}</annotation></semantics></math></p>
+<p>Here <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>M</mi><annotation encoding="application/x-tex">M</annotation></semantics></math> is the causal mask: inaccessible future-token scores receive a sufficiently negative value, mathematically <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>−</mi><mi>∞</mi></mrow><annotation encoding="application/x-tex">-\infty</annotation></semantics></math>, before softmax. When considering only keys up to the current position, there are no future positions and the mask may be omitted from the displayed equation. The <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>1</mn><mi>/</mi><msqrt><mi>D</mi></msqrt></mrow><annotation encoding="application/x-tex">1/\sqrt D</annotation></semantics></math> factor scales dot products; softmax converts each row of scores into attention weights summing to one.</p>
+<h2 id="matrix-multiplication-for-three-prompt-positions">Matrix multiplication for three prompt positions</h2>
+<p>For one attention head, the matrices have shape <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>Q</mi><mo>,</mo><mi>K</mi><mo>,</mo><mi>V</mi><mo>∈</mo><msup><mi>ℝ</mi><mrow><mn>3</mn><mo>×</mo><mn>128</mn></mrow></msup></mrow><annotation encoding="application/x-tex">Q,K,V\in\mathbb{R}^{3\times128}</annotation></semantics></math>. Thus:</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><munder><munder><mi>Q</mi><mo accent="true">⏟</mo></munder><mrow><mn>3</mn><mo>×</mo><mn>128</mn></mrow></munder><munder><munder><msup><mi>K</mi><mi>⊤</mi></msup><mo accent="true">⏟</mo></munder><mrow><mn>128</mn><mo>×</mo><mn>3</mn></mrow></munder><mo>=</mo><munder><munder><mrow><mi>Q</mi><msup><mi>K</mi><mi>⊤</mi></msup></mrow><mo accent="true">⏟</mo></munder><mrow><mn>3</mn><mo>×</mo><mn>3</mn></mrow></munder><mi>.</mi></mrow><annotation encoding="application/x-tex">\underbrace{Q}_{3\times128}\underbrace{K^\top}_{128\times3}=\underbrace{QK^\top}_{3\times3}.</annotation></semantics></math></p>
+<p>Expanding the scores:</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>Q</mi><msup><mi>K</mi><mi>⊤</mi></msup><mo>=</mo><mrow><mo stretchy="true" form="prefix">[</mo><mtable><mtr><mtd columnalign="center" style="text-align: center"><msub><mi>Q</mi><mn>1</mn></msub><msubsup><mi>K</mi><mn>1</mn><mi>⊤</mi></msubsup></mtd><mtd columnalign="center" style="text-align: center"><msub><mi>Q</mi><mn>1</mn></msub><msubsup><mi>K</mi><mn>2</mn><mi>⊤</mi></msubsup></mtd><mtd columnalign="center" style="text-align: center"><msub><mi>Q</mi><mn>1</mn></msub><msubsup><mi>K</mi><mn>3</mn><mi>⊤</mi></msubsup></mtd></mtr><mtr><mtd columnalign="center" style="text-align: center"><msub><mi>Q</mi><mn>2</mn></msub><msubsup><mi>K</mi><mn>1</mn><mi>⊤</mi></msubsup></mtd><mtd columnalign="center" style="text-align: center"><msub><mi>Q</mi><mn>2</mn></msub><msubsup><mi>K</mi><mn>2</mn><mi>⊤</mi></msubsup></mtd><mtd columnalign="center" style="text-align: center"><msub><mi>Q</mi><mn>2</mn></msub><msubsup><mi>K</mi><mn>3</mn><mi>⊤</mi></msubsup></mtd></mtr><mtr><mtd columnalign="center" style="text-align: center"><msub><mi>Q</mi><mn>3</mn></msub><msubsup><mi>K</mi><mn>1</mn><mi>⊤</mi></msubsup></mtd><mtd columnalign="center" style="text-align: center"><msub><mi>Q</mi><mn>3</mn></msub><msubsup><mi>K</mi><mn>2</mn><mi>⊤</mi></msubsup></mtd><mtd columnalign="center" style="text-align: center"><msub><mi>Q</mi><mn>3</mn></msub><msubsup><mi>K</mi><mn>3</mn><mi>⊤</mi></msubsup></mtd></mtr></mtable><mo stretchy="true" form="postfix">]</mo></mrow><mi>.</mi></mrow><annotation encoding="application/x-tex">QK^\top=\begin{bmatrix}
+Q_1K_1^\top &amp; Q_1K_2^\top &amp; Q_1K_3^\top\\
+Q_2K_1^\top &amp; Q_2K_2^\top &amp; Q_2K_3^\top\\
+Q_3K_1^\top &amp; Q_3K_2^\top &amp; Q_3K_3^\top
+\end{bmatrix}.</annotation></semantics></math></p>
+<p>A decoder uses <strong>causal</strong> attention: Query 1 may attend only to position 1; Query 2 to positions 1–2; Query 3 to positions 1–3.</p>
+<figure>
+<img src="/notes/attention-kv-cache-gqa/figures/05_causal_mask.png" alt="Figure 5. The lower-triangular causal mask for three positions; the highlighted row is token 3’s attention." />
+<figcaption aria-hidden="true">Figure 5. The lower-triangular causal mask for three positions; the highlighted row is token 3’s attention.</figcaption>
+</figure>
+<p><em>Figure 5. The lower-triangular causal mask for three positions; the highlighted row is token 3’s attention.</em> The attention output for all three tokens is <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>O</mi><mo>∈</mo><msup><mi>ℝ</mi><mrow><mn>3</mn><mo>×</mo><mn>128</mn></mrow></msup></mrow><annotation encoding="application/x-tex">O\in\mathbb{R}^{3\times128}</annotation></semantics></math> for one head. Each of the <strong>32 Query heads</strong> produces such an output. These are concatenated into a <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>3</mn><mo>×</mo><mn>4096</mn></mrow><annotation encoding="application/x-tex">3\times4096</annotation></semantics></math> representation and passed through an output projection (typically <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>4096</mn><mo>×</mo><mn>4096</mn></mrow><annotation encoding="application/x-tex">4096\times4096</annotation></semantics></math> in this configuration).</p>
+<h2 id="derive-the-single-token-equation-from-the-general-equation">Derive the single-token equation from the general equation</h2>
+<p>If we only need token 3 (“sat”), use the <strong>third Query row</strong>:</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><menclose notation="box"><mrow><msub><mi>O</mi><mn>3</mn></msub><mo>=</mo><mo>softmax</mo><mrow><mo stretchy="true" form="prefix">(</mo><mfrac><mrow><msub><mi>Q</mi><mn>3</mn></msub><msup><mrow><mo stretchy="true" form="prefix">[</mo><msub><mi>K</mi><mn>1</mn></msub><mo>,</mo><msub><mi>K</mi><mn>2</mn></msub><mo>,</mo><msub><mi>K</mi><mn>3</mn></msub><mo stretchy="true" form="postfix">]</mo></mrow><mi>⊤</mi></msup></mrow><msqrt><mi>D</mi></msqrt></mfrac><mo stretchy="true" form="postfix">)</mo></mrow><mrow><mo stretchy="true" form="prefix">[</mo><msub><mi>V</mi><mn>1</mn></msub><mo>,</mo><msub><mi>V</mi><mn>2</mn></msub><mo>,</mo><msub><mi>V</mi><mn>3</mn></msub><mo stretchy="true" form="postfix">]</mo></mrow><mi>.</mi></mrow></menclose><annotation encoding="application/x-tex">\boxed{O_3=\operatorname{softmax}\left(\frac{Q_3[K_1,K_2,K_3]^\top}{\sqrt D}\right)[V_1,V_2,V_3].}</annotation></semantics></math></p>
+<p>The shapes, for <strong>one head</strong>, are:</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><munder><munder><msub><mi>Q</mi><mn>3</mn></msub><mo accent="true">⏟</mo></munder><mrow><mn>1</mn><mo>×</mo><mn>128</mn></mrow></munder><munder><munder><msup><mrow><mo stretchy="true" form="prefix">[</mo><msub><mi>K</mi><mn>1</mn></msub><mo>,</mo><msub><mi>K</mi><mn>2</mn></msub><mo>,</mo><msub><mi>K</mi><mn>3</mn></msub><mo stretchy="true" form="postfix">]</mo></mrow><mi>⊤</mi></msup><mo accent="true">⏟</mo></munder><mrow><mn>128</mn><mo>×</mo><mn>3</mn></mrow></munder><mspace width="0.222em"></mspace><mo>→</mo><mspace width="0.222em"></mspace><munder><munder><mtext mathvariant="normal">scores</mtext><mo accent="true">⏟</mo></munder><mrow><mn>1</mn><mo>×</mo><mn>3</mn></mrow></munder><mspace width="0.222em"></mspace><mo>→</mo><mspace width="0.222em"></mspace><munder><munder><mrow><mo stretchy="true" form="prefix">[</mo><msub><mi>V</mi><mn>1</mn></msub><mo>,</mo><msub><mi>V</mi><mn>2</mn></msub><mo>,</mo><msub><mi>V</mi><mn>3</mn></msub><mo stretchy="true" form="postfix">]</mo></mrow><mo accent="true">⏟</mo></munder><mrow><mn>3</mn><mo>×</mo><mn>128</mn></mrow></munder><mspace width="0.222em"></mspace><mo>→</mo><mspace width="0.222em"></mspace><munder><munder><msub><mi>O</mi><mn>3</mn></msub><mo accent="true">⏟</mo></munder><mrow><mn>1</mn><mo>×</mo><mn>128</mn></mrow></munder><mi>.</mi></mrow><annotation encoding="application/x-tex">\underbrace{Q_3}_{1\times128}\underbrace{[K_1,K_2,K_3]^\top}_{128\times3}
+\ \rightarrow\ \underbrace{\text{scores}}_{1\times3}
+\ \rightarrow\ \underbrace{[V_1,V_2,V_3]}_{3\times128}
+\ \rightarrow\ \underbrace{O_3}_{1\times128}.</annotation></semantics></math></p>
+<p>The bracket notation <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mo stretchy="true" form="prefix">[</mo><msub><mi>K</mi><mn>1</mn></msub><mo>,</mo><msub><mi>K</mi><mn>2</mn></msub><mo>,</mo><msub><mi>K</mi><mn>3</mn></msub><mo stretchy="true" form="postfix">]</mo></mrow><annotation encoding="application/x-tex">[K_1,K_2,K_3]</annotation></semantics></math> means the <strong>stack of row vectors</strong>, not a single concatenated row vector. The earlier general equation and this single-token equation describe the <em>same operation</em>. The latter merely calculates one row of the attention output.</p>
+<h2 id="fully-worked-numeric-example">Fully worked numeric example</h2>
+<p>Use an artificially small <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>D</mi><mo>=</mo><mn>2</mn></mrow><annotation encoding="application/x-tex">D=2</annotation></semantics></math> to make the numbers visible:</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>Q</mi><mrow><mi>c</mi><mi>a</mi><mi>t</mi></mrow></msub><mo>=</mo><mrow><mo stretchy="true" form="prefix">[</mo><mn>2</mn><mo>,</mo><mn>0</mn><mo stretchy="true" form="postfix">]</mo></mrow><mo>,</mo><mspace width="1.0em"></mspace><msub><mi>K</mi><mrow><mi>T</mi><mi>h</mi><mi>e</mi></mrow></msub><mo>=</mo><mrow><mo stretchy="true" form="prefix">[</mo><mn>1</mn><mo>,</mo><mn>0</mn><mo stretchy="true" form="postfix">]</mo></mrow><mo>,</mo><mspace width="1.0em"></mspace><msub><mi>K</mi><mrow><mi>c</mi><mi>a</mi><mi>t</mi></mrow></msub><mo>=</mo><mrow><mo stretchy="true" form="prefix">[</mo><mn>0</mn><mo>,</mo><mn>1</mn><mo stretchy="true" form="postfix">]</mo></mrow><mi>.</mi></mrow><annotation encoding="application/x-tex">Q_{cat}=[2,0],\quad K_{The}=[1,0],\quad K_{cat}=[0,1].</annotation></semantics></math></p>
+<p>Scaled Query–Key scores are:</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>s</mi><mo>=</mo><mrow><mo stretchy="true" form="prefix">[</mo><mfrac><mn>2</mn><msqrt><mn>2</mn></msqrt></mfrac><mo>,</mo><mfrac><mn>0</mn><msqrt><mn>2</mn></msqrt></mfrac><mo stretchy="true" form="postfix">]</mo></mrow><mo>≈</mo><mrow><mo stretchy="true" form="prefix">[</mo><mn>1.414</mn><mo>,</mo><mn>0</mn><mo stretchy="true" form="postfix">]</mo></mrow><mi>.</mi></mrow><annotation encoding="application/x-tex">s=\left[\frac{2}{\sqrt2},\frac{0}{\sqrt2}\right]\approx[1.414,0].</annotation></semantics></math></p>
+<p>Softmax produces attention weights <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>a</mi><mo>≈</mo><mrow><mo stretchy="true" form="prefix">[</mo><mn>0.804</mn><mo>,</mo><mn>0.196</mn><mo stretchy="true" form="postfix">]</mo></mrow></mrow><annotation encoding="application/x-tex">a\approx[0.804,0.196]</annotation></semantics></math>. If:</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>V</mi><mrow><mi>T</mi><mi>h</mi><mi>e</mi></mrow></msub><mo>=</mo><mrow><mo stretchy="true" form="prefix">[</mo><mn>10</mn><mo>,</mo><mn>0</mn><mo stretchy="true" form="postfix">]</mo></mrow><mo>,</mo><mspace width="2.0em"></mspace><msub><mi>V</mi><mrow><mi>c</mi><mi>a</mi><mi>t</mi></mrow></msub><mo>=</mo><mrow><mo stretchy="true" form="prefix">[</mo><mn>0</mn><mo>,</mo><mn>20</mn><mo stretchy="true" form="postfix">]</mo></mrow><mo>,</mo></mrow><annotation encoding="application/x-tex">V_{The}=[10,0],\qquad V_{cat}=[0,20],</annotation></semantics></math></p>
+<p>then:</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>O</mi><mrow><mi>c</mi><mi>a</mi><mi>t</mi></mrow></msub><mo>=</mo><mn>0.804</mn><mrow><mo stretchy="true" form="prefix">[</mo><mn>10</mn><mo>,</mo><mn>0</mn><mo stretchy="true" form="postfix">]</mo></mrow><mo>+</mo><mn>0.196</mn><mrow><mo stretchy="true" form="prefix">[</mo><mn>0</mn><mo>,</mo><mn>20</mn><mo stretchy="true" form="postfix">]</mo></mrow><mo>≈</mo><menclose notation="box"><mrow><mo stretchy="true" form="prefix">[</mo><mn>8.04</mn><mo>,</mo><mn>3.92</mn><mo stretchy="true" form="postfix">]</mo></mrow></menclose><mi>.</mi></mrow><annotation encoding="application/x-tex">O_{cat}=0.804[10,0]+0.196[0,20]\approx\boxed{[8.04,3.92]}.</annotation></semantics></math></p>
+<p>This result is a <strong>weighted combination of Value vectors</strong>. The example values and token attention pattern are invented only to demonstrate arithmetic.</p>
+<h1 id="why-causal-attention-enables-a-kv-cache">Why causal attention enables a KV cache</h1>
+<p>The KV cache exists because in a decoder-only <em>causal</em> transformer, appending a new token does not alter hidden states already computed at earlier positions. Previous tokens cannot attend to later ones. Their K/V representations for a given layer therefore stay valid for subsequent steps, provided the model, positional conventions and earlier context remain unchanged.</p>
+<p>For token <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>t</mi><annotation encoding="application/x-tex">t</annotation></semantics></math>, current-head attention needs:</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>O</mi><mi>t</mi></msub><mo>=</mo><mo>softmax</mo><mrow><mo stretchy="true" form="prefix">(</mo><mfrac><mrow><msub><mi>Q</mi><mi>t</mi></msub><msup><mrow><mo stretchy="true" form="prefix">[</mo><msub><mi>K</mi><mn>1</mn></msub><mo>,</mo><mi>…</mi><mo>,</mo><msub><mi>K</mi><mi>t</mi></msub><mo stretchy="true" form="postfix">]</mo></mrow><mi>⊤</mi></msup></mrow><msqrt><mi>D</mi></msqrt></mfrac><mo stretchy="true" form="postfix">)</mo></mrow><mrow><mo stretchy="true" form="prefix">[</mo><msub><mi>V</mi><mn>1</mn></msub><mo>,</mo><mi>…</mi><mo>,</mo><msub><mi>V</mi><mi>t</mi></msub><mo stretchy="true" form="postfix">]</mo></mrow><mi>.</mi></mrow><annotation encoding="application/x-tex">O_t=\operatorname{softmax}\left(\frac{Q_t[K_1,\ldots,K_t]^\top}{\sqrt D}\right)[V_1,\ldots,V_t].</annotation></semantics></math></p>
+<p><strong>What is reused?</strong> <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>K</mi><mn>1</mn></msub><mi>…</mi><msub><mi>K</mi><mrow><mi>t</mi><mo>−</mo><mn>1</mn></mrow></msub></mrow><annotation encoding="application/x-tex">K_1\ldots K_{t-1}</annotation></semantics></math> and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>V</mi><mn>1</mn></msub><mi>…</mi><msub><mi>V</mi><mrow><mi>t</mi><mo>−</mo><mn>1</mn></mrow></msub></mrow><annotation encoding="application/x-tex">V_1\ldots V_{t-1}</annotation></semantics></math>.</p>
+<p><strong>What is newly calculated?</strong> <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>Q</mi><mi>t</mi></msub><mo>,</mo><msub><mi>K</mi><mi>t</mi></msub><mo>,</mo><msub><mi>V</mi><mi>t</mi></msub></mrow><annotation encoding="application/x-tex">Q_t,K_t,V_t</annotation></semantics></math>, based on the current hidden state at that layer. New <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>K</mi><mi>t</mi></msub><mo>,</mo><msub><mi>V</mi><mi>t</mi></msub></mrow><annotation encoding="application/x-tex">K_t,V_t</annotation></semantics></math> are appended to the per-layer cache.</p>
+<p><strong>Why is Q not cached?</strong> Past Queries <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>Q</mi><mn>1</mn></msub><mi>…</mi><msub><mi>Q</mi><mrow><mi>t</mi><mo>−</mo><mn>1</mn></mrow></msub></mrow><annotation encoding="application/x-tex">Q_1\ldots Q_{t-1}</annotation></semantics></math> were needed to calculate past outputs. The new output formula has <strong><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>Q</mi><mi>t</mi></msub><annotation encoding="application/x-tex">Q_t</annotation></semantics></math> but no past <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>Q</mi><mi>i</mi></msub><annotation encoding="application/x-tex">Q_i</annotation></semantics></math> terms</strong>. Keeping those Queries would consume memory without helping standard next-token decoding.</p>
+<table>
+<thead>
+<tr class="header">
+<th style="text-align: left;">Representation</th>
+<th style="text-align: left;">Role in attention</th>
+<th style="text-align: left;">Keep for future decode?</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">Past Query <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>Q</mi><mi>i</mi></msub><annotation encoding="application/x-tex">Q_i</annotation></semantics></math></td>
+<td style="text-align: left;">Produced the output at past position <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>i</mi><annotation encoding="application/x-tex">i</annotation></semantics></math></td>
+<td style="text-align: left;"><strong>No</strong></td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">Past Key <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>K</mi><mi>i</mi></msub><annotation encoding="application/x-tex">K_i</annotation></semantics></math></td>
+<td style="text-align: left;">Is matched by later Query vectors</td>
+<td style="text-align: left;"><strong>Yes</strong></td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">Past Value <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>V</mi><mi>i</mi></msub><annotation encoding="application/x-tex">V_i</annotation></semantics></math></td>
+<td style="text-align: left;">Is mixed into later attention outputs</td>
+<td style="text-align: left;"><strong>Yes</strong></td>
+</tr>
+</tbody>
+</table>
+<p>The cache also remains <strong>layer-local</strong>: layer <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mo>ℓ</mo><annotation encoding="application/x-tex">\ell</annotation></semantics></math> has its own projected <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msup><mi>K</mi><mrow><mo stretchy="true" form="prefix">(</mo><mo>ℓ</mo><mo stretchy="true" form="postfix">)</mo></mrow></msup><mo>,</mo><msup><mi>V</mi><mrow><mo stretchy="true" form="prefix">(</mo><mo>ℓ</mo><mo stretchy="true" form="postfix">)</mo></mrow></msup></mrow><annotation encoding="application/x-tex">K^{(\ell)},V^{(\ell)}</annotation></semantics></math> from that layer’s hidden states. A single cache cannot be reused indiscriminately across all layers.</p>
+<h1 id="prefill-and-decode-a-precise-timeline">Prefill and decode: a precise timeline</h1>
+<p><strong>Prefill:</strong> The model processes the initial prompt positions together (often with specialized tiled attention kernels). It computes Q/K/V for the prompt in every layer, uses <em>causal</em> attention, and creates the prompt KV cache. The final prompt position’s output logits yield the <strong>first generated token</strong>.</p>
+<p><strong>Decode:</strong> The next forward pass consumes that newly generated token as input, forms its Q/K/V in each layer, attends against the cached prompt keys/values plus its own K/V, appends its K/V, and predicts the next token. Repeat for later generated tokens.</p>
+<figure>
+<img src="/notes/attention-kv-cache-gqa/figures/06_prefill_decode_shapes.png" alt="Figure 6. Prefill processes multiple Query rows; decode processes one new Query row for each sequence." />
+<figcaption aria-hidden="true">Figure 6. Prefill processes multiple Query rows; decode processes one new Query row for each sequence.</figcaption>
+</figure>
+<p><em>Figure 6. Prefill processes multiple Query rows; decode processes one new Query row for each sequence.</em> <img src="/notes/attention-kv-cache-gqa/figures/07_cache_evolution.png" alt="Figure 7. Cache contents after “The cat sat” and after the next forward pass that processes “on”." /></p>
+<p><em>Figure 7. Cache contents after “The cat sat” and after the next forward pass that processes “on”.</em> The phrase <strong>“The cat sat on”</strong> is pedagogical: after prefill of “The cat sat”, suppose the model predicts <strong>“on”</strong>. The cache initially holds <strong>The / cat / sat</strong>; the <em>following</em> decode step processes <strong>on</strong> and appends its K/V. Thus it is more precise to say “first token sampled after prefill” than “prefill processes the generated token.”</p>
+<h2 id="decode-step-computing-attention-for-on">Decode step: computing attention for “on”</h2>
+<p>In the running example, the prompt <code>The cat sat</code> is processed during prefill and the model predicts <code>on</code>. On the <strong>next</strong> forward pass, the model processes <code>on</code> as input. At each layer, it computes <strong>new</strong> <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>Q</mi><mn>4</mn></msub><mo>,</mo><msub><mi>K</mi><mn>4</mn></msub><mo>,</mo><msub><mi>V</mi><mn>4</mn></msub></mrow><annotation encoding="application/x-tex">Q_4,K_4,V_4</annotation></semantics></math> and reads the <strong>old</strong> <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>K</mi><mn>1</mn></msub><mo>,</mo><msub><mi>K</mi><mn>2</mn></msub><mo>,</mo><msub><mi>K</mi><mn>3</mn></msub></mrow><annotation encoding="application/x-tex">K_1,K_2,K_3</annotation></semantics></math> and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>V</mi><mn>1</mn></msub><mo>,</mo><msub><mi>V</mi><mn>2</mn></msub><mo>,</mo><msub><mi>V</mi><mn>3</mn></msub></mrow><annotation encoding="application/x-tex">V_1,V_2,V_3</annotation></semantics></math> from that layer’s cache. It does not need <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>Q</mi><mn>1</mn></msub><mo>,</mo><msub><mi>Q</mi><mn>2</mn></msub><mo>,</mo><msub><mi>Q</mi><mn>3</mn></msub></mrow><annotation encoding="application/x-tex">Q_1,Q_2,Q_3</annotation></semantics></math> again.</p>
+<figure>
+<img src="/notes/attention-kv-cache-gqa/figures/08_decode_on_attention.png" alt="Figure 8. How Q4 matches all four Keys, softmax determines attention weights, and Values are combined into O4." />
+<figcaption aria-hidden="true">Figure 8. How Q4 matches all four Keys, softmax determines attention weights, and Values are combined into O4.</figcaption>
+</figure>
+<p><em>Figure 8. How Q4 matches all four Keys, softmax determines attention weights, and Values are combined into O4.</em> For one Query head:</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>s</mi><mi>i</mi></msub><mo>=</mo><mfrac><mrow><msub><mi>Q</mi><mn>4</mn></msub><msubsup><mi>K</mi><mi>i</mi><mi>⊤</mi></msubsup></mrow><msqrt><mn>128</mn></msqrt></mfrac><mo>,</mo><mspace width="2.0em"></mspace><mrow><mo stretchy="true" form="prefix">(</mo><msub><mi>a</mi><mn>1</mn></msub><mo>,</mo><msub><mi>a</mi><mn>2</mn></msub><mo>,</mo><msub><mi>a</mi><mn>3</mn></msub><mo>,</mo><msub><mi>a</mi><mn>4</mn></msub><mo stretchy="true" form="postfix">)</mo></mrow><mo>=</mo><mo>softmax</mo><mrow><mo stretchy="true" form="prefix">(</mo><msub><mi>s</mi><mn>1</mn></msub><mo>,</mo><msub><mi>s</mi><mn>2</mn></msub><mo>,</mo><msub><mi>s</mi><mn>3</mn></msub><mo>,</mo><msub><mi>s</mi><mn>4</mn></msub><mo stretchy="true" form="postfix">)</mo></mrow><mi>.</mi></mrow><annotation encoding="application/x-tex">s_i=\frac{Q_4K_i^\top}{\sqrt{128}},\qquad (a_1,a_2,a_3,a_4)=\operatorname{softmax}(s_1,s_2,s_3,s_4).</annotation></semantics></math></p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><menclose notation="box"><mrow><msub><mi>O</mi><mn>4</mn></msub><mo>=</mo><msub><mi>a</mi><mn>1</mn></msub><msub><mi>V</mi><mn>1</mn></msub><mo>+</mo><msub><mi>a</mi><mn>2</mn></msub><msub><mi>V</mi><mn>2</mn></msub><mo>+</mo><msub><mi>a</mi><mn>3</mn></msub><msub><mi>V</mi><mn>3</mn></msub><mo>+</mo><msub><mi>a</mi><mn>4</mn></msub><msub><mi>V</mi><mn>4</mn></msub><mi>.</mi></mrow></menclose><annotation encoding="application/x-tex">\boxed{O_4=a_1V_1+a_2V_2+a_3V_3+a_4V_4.}</annotation></semantics></math></p>
+<p>The labels <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>K</mi><mi>i</mi></msub><mo>,</mo><msub><mi>V</mi><mi>i</mi></msub></mrow><annotation encoding="application/x-tex">K_i,V_i</annotation></semantics></math> in this head-wise formula mean the <strong>KV head assigned to the particular Query head</strong>. Other Query heads may use the same stored K/V but calculate their own weights.</p>
+<h2 id="prefill-versus-decode-the-explicit-attention-equations">Prefill versus decode: the explicit attention equations</h2>
+<p><strong>Prefill, three prompt tokens, one Query head.</strong> The Query, Key, and Value matrices each contain three rows. The attention-score matrix has shape <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>3</mn><mo>×</mo><mn>3</mn></mrow><annotation encoding="application/x-tex">3\times3</annotation></semantics></math> and requires a causal mask <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>M</mi><annotation encoding="application/x-tex">M</annotation></semantics></math>:</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><menclose notation="box"><mrow><msub><mi>O</mi><mrow><mn>1</mn><mo>:</mo><mn>3</mn></mrow></msub><mo>=</mo><mo>softmax</mo><mrow><mo stretchy="true" form="prefix">(</mo><mfrac><mrow><msub><mi>Q</mi><mrow><mn>1</mn><mo>:</mo><mn>3</mn></mrow></msub><msubsup><mi>K</mi><mrow><mn>1</mn><mo>:</mo><mn>3</mn></mrow><mi>⊤</mi></msubsup></mrow><msqrt><mn>128</mn></msqrt></mfrac><mo>+</mo><mi>M</mi><mo stretchy="true" form="postfix">)</mo></mrow><msub><mi>V</mi><mrow><mn>1</mn><mo>:</mo><mn>3</mn></mrow></msub><mi>.</mi></mrow></menclose><annotation encoding="application/x-tex">\boxed{O_{1:3}=\operatorname{softmax}\left(\frac{Q_{1:3}K_{1:3}^{\top}}{\sqrt{128}}+M\right)V_{1:3}.}</annotation></semantics></math></p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><munder><munder><mrow><mo stretchy="true" form="prefix">(</mo><mn>3</mn><mo>×</mo><mn>128</mn><mo stretchy="true" form="postfix">)</mo></mrow><mo accent="true">⏟</mo></munder><mi>Q</mi></munder><mspace width="0.278em"></mspace><munder><munder><mrow><mo stretchy="true" form="prefix">(</mo><mn>128</mn><mo>×</mo><mn>3</mn><mo stretchy="true" form="postfix">)</mo></mrow><mo accent="true">⏟</mo></munder><msup><mi>K</mi><mi>⊤</mi></msup></munder><mo>→</mo><munder><munder><mrow><mo stretchy="true" form="prefix">(</mo><mn>3</mn><mo>×</mo><mn>3</mn><mo stretchy="true" form="postfix">)</mo></mrow><mo accent="true">⏟</mo></munder><mtext mathvariant="normal">scores</mtext></munder><mspace width="0.278em"></mspace><munder><munder><mrow><mo stretchy="true" form="prefix">(</mo><mn>3</mn><mo>×</mo><mn>128</mn><mo stretchy="true" form="postfix">)</mo></mrow><mo accent="true">⏟</mo></munder><mi>V</mi></munder><mo>→</mo><munder><munder><mrow><mo stretchy="true" form="prefix">(</mo><mn>3</mn><mo>×</mo><mn>128</mn><mo stretchy="true" form="postfix">)</mo></mrow><mo accent="true">⏟</mo></munder><mi>O</mi></munder><mi>.</mi></mrow><annotation encoding="application/x-tex">\underbrace{(3\times128)}_Q\;\underbrace{(128\times3)}_{K^\top}\longrightarrow\underbrace{(3\times3)}_{\text{scores}}\;\underbrace{(3\times128)}_V\longrightarrow\underbrace{(3\times128)}_O.</annotation></semantics></math></p>
+<p><strong>Decode, fourth token, one Query head.</strong> Only the current Query <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>Q</mi><mn>4</mn></msub><annotation encoding="application/x-tex">Q_4</annotation></semantics></math> is computed, while K/V include the three cached tokens and the current one:</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><menclose notation="box"><mrow><msub><mi>O</mi><mn>4</mn></msub><mo>=</mo><mo>softmax</mo><mrow><mo stretchy="true" form="prefix">(</mo><mfrac><mrow><msub><mi>Q</mi><mn>4</mn></msub><msup><mrow><mo stretchy="true" form="prefix">[</mo><msub><mi>K</mi><mn>1</mn></msub><mo>,</mo><msub><mi>K</mi><mn>2</mn></msub><mo>,</mo><msub><mi>K</mi><mn>3</mn></msub><mo>,</mo><msub><mi>K</mi><mn>4</mn></msub><mo stretchy="true" form="postfix">]</mo></mrow><mi>⊤</mi></msup></mrow><msqrt><mn>128</mn></msqrt></mfrac><mo stretchy="true" form="postfix">)</mo></mrow><mrow><mo stretchy="true" form="prefix">[</mo><msub><mi>V</mi><mn>1</mn></msub><mo>,</mo><msub><mi>V</mi><mn>2</mn></msub><mo>,</mo><msub><mi>V</mi><mn>3</mn></msub><mo>,</mo><msub><mi>V</mi><mn>4</mn></msub><mo stretchy="true" form="postfix">]</mo></mrow><mi>.</mi></mrow></menclose><annotation encoding="application/x-tex">\boxed{O_4=\operatorname{softmax}\left(\frac{Q_4[K_1,K_2,K_3,K_4]^{\top}}{\sqrt{128}}\right)[V_1,V_2,V_3,V_4].}</annotation></semantics></math></p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><munder><munder><mrow><mo stretchy="true" form="prefix">(</mo><mn>1</mn><mo>×</mo><mn>128</mn><mo stretchy="true" form="postfix">)</mo></mrow><mo accent="true">⏟</mo></munder><msub><mi>Q</mi><mn>4</mn></msub></munder><mspace width="0.278em"></mspace><munder><munder><mrow><mo stretchy="true" form="prefix">(</mo><mn>128</mn><mo>×</mo><mn>4</mn><mo stretchy="true" form="postfix">)</mo></mrow><mo accent="true">⏟</mo></munder><msup><mi>K</mi><mi>⊤</mi></msup></munder><mo>→</mo><munder><munder><mrow><mo stretchy="true" form="prefix">(</mo><mn>1</mn><mo>×</mo><mn>4</mn><mo stretchy="true" form="postfix">)</mo></mrow><mo accent="true">⏟</mo></munder><mtext mathvariant="normal">scores</mtext></munder><mspace width="0.278em"></mspace><munder><munder><mrow><mo stretchy="true" form="prefix">(</mo><mn>4</mn><mo>×</mo><mn>128</mn><mo stretchy="true" form="postfix">)</mo></mrow><mo accent="true">⏟</mo></munder><mi>V</mi></munder><mo>→</mo><munder><munder><mrow><mo stretchy="true" form="prefix">(</mo><mn>1</mn><mo>×</mo><mn>128</mn><mo stretchy="true" form="postfix">)</mo></mrow><mo accent="true">⏟</mo></munder><msub><mi>O</mi><mn>4</mn></msub></munder><mi>.</mi></mrow><annotation encoding="application/x-tex">\underbrace{(1\times128)}_{Q_4}\;\underbrace{(128\times4)}_{K^\top}\longrightarrow\underbrace{(1\times4)}_{\text{scores}}\;\underbrace{(4\times128)}_V\longrightarrow\underbrace{(1\times128)}_{O_4}.</annotation></semantics></math></p>
+<p>The square-bracketed K/V notation denotes <strong>row-stacked vectors</strong>, not vectors concatenated along their features. For GQA, these computations occur for each of the 32 Query heads, each accessing one of eight KV heads. During prefill the causal mask excludes future keys; in single-token decode all four available positions are valid, so no future-position mask is shown.</p>
+<figure>
+<img src="/notes/attention-kv-cache-gqa/figures/09_prefill_vs_decode_attention.png" alt="Figure 9. Side-by-side prefill and decode shapes, cache operations, and outputs." />
+<figcaption aria-hidden="true">Figure 9. Side-by-side prefill and decode shapes, cache operations, and outputs.</figcaption>
+</figure>
+<p><em>Figure 9. Side-by-side prefill and decode shapes, cache operations, and outputs.</em> ## Same equation, different tensor sizes</p>
+<p>For one Query head, with a three-token prompt and then the fourth token:</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th style="text-align: left;">Item</th>
+<th style="text-align: left;">Prefill: positions 1–3</th>
+<th style="text-align: left;">Decode: position 4</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">Q</td>
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>3</mn><mo>×</mo><mn>128</mn></mrow><annotation encoding="application/x-tex">3\times128</annotation></semantics></math></td>
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>1</mn><mo>×</mo><mn>128</mn></mrow><annotation encoding="application/x-tex">1\times128</annotation></semantics></math></td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">K, V available for attention</td>
+<td style="text-align: left;">Each <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>3</mn><mo>×</mo><mn>128</mn></mrow><annotation encoding="application/x-tex">3\times128</annotation></semantics></math></td>
+<td style="text-align: left;">Each <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>4</mn><mo>×</mo><mn>128</mn></mrow><annotation encoding="application/x-tex">4\times128</annotation></semantics></math> (3 cached + 1 new)</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">Attention scores</td>
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>3</mn><mo>×</mo><mn>3</mn></mrow><annotation encoding="application/x-tex">3\times3</annotation></semantics></math> (causally masked)</td>
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>1</mn><mo>×</mo><mn>4</mn></mrow><annotation encoding="application/x-tex">1\times4</annotation></semantics></math></td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">Output</td>
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>3</mn><mo>×</mo><mn>128</mn></mrow><annotation encoding="application/x-tex">3\times128</annotation></semantics></math></td>
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>1</mn><mo>×</mo><mn>128</mn></mrow><annotation encoding="application/x-tex">1\times128</annotation></semantics></math></td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">Cache activity</td>
+<td style="text-align: left;">Build prompt KV</td>
+<td style="text-align: left;">Read prior KV and append new KV</td>
+</tr>
+</tbody>
+</table>
+<p>For the fourth position:</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><menclose notation="box"><mrow><msub><mi>O</mi><mn>4</mn></msub><mo>=</mo><mo>softmax</mo><mrow><mo stretchy="true" form="prefix">(</mo><mfrac><mrow><msub><mi>Q</mi><mn>4</mn></msub><msup><mrow><mo stretchy="true" form="prefix">[</mo><msub><mi>K</mi><mn>1</mn></msub><mo>,</mo><msub><mi>K</mi><mn>2</mn></msub><mo>,</mo><msub><mi>K</mi><mn>3</mn></msub><mo>,</mo><msub><mi>K</mi><mn>4</mn></msub><mo stretchy="true" form="postfix">]</mo></mrow><mi>⊤</mi></msup></mrow><msqrt><mi>D</mi></msqrt></mfrac><mo stretchy="true" form="postfix">)</mo></mrow><mrow><mo stretchy="true" form="prefix">[</mo><msub><mi>V</mi><mn>1</mn></msub><mo>,</mo><msub><mi>V</mi><mn>2</mn></msub><mo>,</mo><msub><mi>V</mi><mn>3</mn></msub><mo>,</mo><msub><mi>V</mi><mn>4</mn></msub><mo stretchy="true" form="postfix">]</mo></mrow><mi>.</mi></mrow></menclose><annotation encoding="application/x-tex">\boxed{O_4=\operatorname{softmax}\left(\frac{Q_4[K_1,K_2,K_3,K_4]^\top}{\sqrt D}\right)[V_1,V_2,V_3,V_4].}</annotation></semantics></math></p>
+<p>The attention equation has <strong>not changed</strong>. Only the number of Query rows and the source/number of KV rows have changed. In GQA, this computation is performed separately per Query head, with each group sharing a K/V head.</p>
+<h2 id="compute-consequences">Compute consequences</h2>
+<p>For one head and sequence length <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>S</mi><annotation encoding="application/x-tex">S</annotation></semantics></math>, conventional full self-attention computes <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>S</mi><mo>×</mo><mi>S</mi></mrow><annotation encoding="application/x-tex">S\times S</annotation></semantics></math> Query–Key scores during prefill: roughly <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>O</mi><mrow><mo stretchy="true" form="prefix">(</mo><msup><mi>S</mi><mn>2</mn></msup><mi>D</mi><mo stretchy="true" form="postfix">)</mo></mrow></mrow><annotation encoding="application/x-tex">O(S^2D)</annotation></semantics></math> attention arithmetic. A single new decode Query compares against <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>S</mi><annotation encoding="application/x-tex">S</annotation></semantics></math> available Keys: roughly <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>O</mi><mrow><mo stretchy="true" form="prefix">(</mo><mi>S</mi><mi>D</mi><mo stretchy="true" form="postfix">)</mo></mrow></mrow><annotation encoding="application/x-tex">O(SD)</annotation></semantics></math> attention arithmetic <em>for that new token</em>.</p>
+<p>These complexities refer to the <strong>attention suboperation</strong>; projection/MLP work, batching, kernel tiling and the full model have additional costs. A modern FlashAttention-style prefill need not materialize the entire <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>S</mi><mo>×</mo><mi>S</mi></mrow><annotation encoding="application/x-tex">S\times S</annotation></semantics></math> scores in HBM.</p>
+<p>Prefill is often relatively compute-intensive, whereas long-context decode is frequently constrained by repeated reads of model weights and cached KV, especially at relevant batching levels. <strong>TTFT</strong> (time to first token) contains queueing, prefill and other overheads; <strong>TPOT</strong> (time per output token) characterizes generation latency after the first token.</p>
+<h1 id="kv-cache-memory-derive-it-from-first-principles">KV-cache memory: derive it from first principles</h1>
+<p>One token, one transformer layer, with <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>H</mi><mrow><mi>K</mi><mi>V</mi></mrow></msub><annotation encoding="application/x-tex">H_{KV}</annotation></semantics></math> KV heads and head dimension <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>D</mi><annotation encoding="application/x-tex">D</annotation></semantics></math> stores:</p>
+<ul>
+<li><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>H</mi><mrow><mi>K</mi><mi>V</mi></mrow></msub><mo>×</mo><mi>D</mi></mrow><annotation encoding="application/x-tex">H_{KV}\times D</annotation></semantics></math> <strong>Key elements</strong>.</li>
+<li><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>H</mi><mrow><mi>K</mi><mi>V</mi></mrow></msub><mo>×</mo><mi>D</mi></mrow><annotation encoding="application/x-tex">H_{KV}\times D</annotation></semantics></math> <strong>Value elements</strong>.</li>
+<li>Each element occupies <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>P</mi><annotation encoding="application/x-tex">P</annotation></semantics></math> bytes.</li>
+</ul>
+<p>Thus the logical memory formula is:</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><menclose notation="box"><mrow><msub><mi>M</mi><mrow><mi>K</mi><mi>V</mi></mrow></msub><mo>=</mo><mn>2</mn><mo>×</mo><mi>L</mi><mo>×</mo><mi>B</mi><mo>×</mo><mi>S</mi><mo>×</mo><msub><mi>H</mi><mrow><mi>K</mi><mi>V</mi></mrow></msub><mo>×</mo><mi>D</mi><mo>×</mo><mi>P</mi></mrow></menclose><annotation encoding="application/x-tex">\boxed{M_{KV}=2\times L\times B\times S\times H_{KV}\times D\times P}</annotation></semantics></math></p>
+<p>where <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>L</mi><annotation encoding="application/x-tex">L</annotation></semantics></math> is layers, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>B</mi><annotation encoding="application/x-tex">B</annotation></semantics></math> is number of sequences of equal cached length, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>S</mi><annotation encoding="application/x-tex">S</annotation></semantics></math> is tokens cached per sequence, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>H</mi><mrow><mi>K</mi><mi>V</mi></mrow></msub><annotation encoding="application/x-tex">H_{KV}</annotation></semantics></math> is KV heads, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>D</mi><annotation encoding="application/x-tex">D</annotation></semantics></math> is elements per K/V head, and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>P</mi><annotation encoding="application/x-tex">P</annotation></semantics></math> is bytes per element. For unequal sequence lengths, replace <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>B</mi><mo>×</mo><mi>S</mi></mrow><annotation encoding="application/x-tex">B\times S</annotation></semantics></math> with <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mo>∑</mo><mi>b</mi></msub><msub><mi>S</mi><mi>b</mi></msub></mrow><annotation encoding="application/x-tex">\sum_b S_b</annotation></semantics></math>.</p>
+<h2 id="worked-example-32-layers-gqa-8192-tokens-bf16">Worked example: 32 layers, GQA, 8,192 tokens, BF16</h2>
+<p>Use <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>L</mi><mo>=</mo><mn>32</mn></mrow><annotation encoding="application/x-tex">L=32</annotation></semantics></math>, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>B</mi><mo>=</mo><mn>1</mn></mrow><annotation encoding="application/x-tex">B=1</annotation></semantics></math>, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>S</mi><mo>=</mo><mn>8192</mn></mrow><annotation encoding="application/x-tex">S=8192</annotation></semantics></math>, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>H</mi><mrow><mi>K</mi><mi>V</mi></mrow></msub><mo>=</mo><mn>8</mn></mrow><annotation encoding="application/x-tex">H_{KV}=8</annotation></semantics></math>, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>D</mi><mo>=</mo><mn>128</mn></mrow><annotation encoding="application/x-tex">D=128</annotation></semantics></math>, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>P</mi><mo>=</mo><mn>2</mn></mrow><annotation encoding="application/x-tex">P=2</annotation></semantics></math>.</p>
+<ol type="1">
+<li><strong>One K head per token per layer:</strong> <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>128</mn><mo>×</mo><mn>2</mn><mo>=</mo><mn>256</mn></mrow><annotation encoding="application/x-tex">128\times2=256</annotation></semantics></math> bytes.</li>
+<li><strong>One V head:</strong> another 256 bytes.</li>
+<li><strong>All eight KV heads:</strong> <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>8</mn><mo>×</mo><mrow><mo stretchy="true" form="prefix">(</mo><mn>256</mn><mo>+</mo><mn>256</mn><mo stretchy="true" form="postfix">)</mo></mrow><mo>=</mo><mn>4096</mn></mrow><annotation encoding="application/x-tex">8\times(256+256)=4096</annotation></semantics></math> bytes = <strong>4 KiB</strong> per token per layer.</li>
+<li><strong>All 32 layers:</strong> <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>32</mn><mo>×</mo><mn>4</mn><mrow><mspace width="0.333em"></mspace><mtext mathvariant="normal"> KiB</mtext></mrow><mo>=</mo><mn>128</mn><mrow><mspace width="0.333em"></mspace><mtext mathvariant="normal"> KiB</mtext></mrow></mrow><annotation encoding="application/x-tex">32\times4\text{ KiB}=128\text{ KiB}</annotation></semantics></math> per token.</li>
+<li><strong>At 8,192 cached tokens:</strong> <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>8192</mn><mo>×</mo><mn>128</mn><mrow><mspace width="0.333em"></mspace><mtext mathvariant="normal"> KiB</mtext></mrow><mo>=</mo><menclose notation="box"><mrow><mn>1</mn><mrow><mspace width="0.333em"></mspace><mtext mathvariant="normal"> GiB</mtext></mrow></mrow></menclose></mrow><annotation encoding="application/x-tex">8192\times128\text{ KiB}=\boxed{1\text{ GiB}}</annotation></semantics></math> for one sequence.</li>
+<li><strong>At batch size 32</strong>, assuming each sequence has 8,192 cached tokens: <strong>32 GiB</strong> logical KV data.</li>
+</ol>
+<p>The hidden state is <strong>4,096 numerical dimensions</strong>. Separately, the computed K/V storage here is <strong>4,096 bytes</strong> per token per layer. Those equal-looking numbers refer to different units and their equality is incidental.</p>
+<p>Actual allocated memory may differ because of page/block granularity, fragmentation, reservations, sliding-window or other attention variants, concurrency, cache eviction, prefix sharing, replication or distribution across devices. This formula estimates the logical <strong>full-history</strong> KV tensor payload.</p>
+<h1 id="multi-head-grouped-query-and-multi-query-attention">Multi-head, grouped-query, and multi-query attention</h1>
+<p>Three attention designs vary mainly in <strong>how many K/V heads the model learns and stores</strong> relative to Query heads.</p>
+<table>
+<colgroup>
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th style="text-align: left;">Design</th>
+<th style="text-align: right;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>H</mi><mi>Q</mi></msub><annotation encoding="application/x-tex">H_Q</annotation></semantics></math></th>
+<th style="text-align: right;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>H</mi><mrow><mi>K</mi><mi>V</mi></mrow></msub><annotation encoding="application/x-tex">H_{KV}</annotation></semantics></math></th>
+<th style="text-align: right;">Query heads per KV head</th>
+<th style="text-align: right;">Logical KV vs MHA</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">Multi-Head Attention (MHA)</td>
+<td style="text-align: right;">32</td>
+<td style="text-align: right;">32</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">100%</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">Grouped-Query Attention (GQA)</td>
+<td style="text-align: right;">32</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">4</td>
+<td style="text-align: right;"><strong>25%</strong></td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">Multi-Query Attention (MQA)</td>
+<td style="text-align: right;">32</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">32</td>
+<td style="text-align: right;"><strong>3.125%</strong></td>
+</tr>
+</tbody>
+</table>
+<figure>
+<img src="/notes/attention-kv-cache-gqa/figures/10_mha_gqa_mqa.png" alt="Figure 10. MHA, GQA and MQA illustrated with eight Queries." />
+<figcaption aria-hidden="true">Figure 10. MHA, GQA and MQA illustrated with eight Queries.</figcaption>
+</figure>
+<p><em>Figure 10. MHA, GQA and MQA illustrated with eight Queries.</em> For GQA, <strong>four independent Q heads share one K head and one V head</strong>, but each Query obtains its <strong>own attention weights</strong>. These heads are not averaged into one Query. Efficient implementations avoid physically replicating the shared K/V tensors in the persistent cache.</p>
+<p>The reduction compared with an otherwise identical MHA design is:</p>
+<p><math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mtext mathvariant="normal">KV memory reduction factor</mtext><mo>=</mo><mfrac><msub><mi>H</mi><mi>Q</mi></msub><msub><mi>H</mi><mrow><mi>K</mi><mi>V</mi></mrow></msub></mfrac><mo>=</mo><mfrac><mn>32</mn><mn>8</mn></mfrac><mo>=</mo><menclose notation="box"><mrow><mn>4</mn><mo>×</mo></mrow></menclose><mi>.</mi></mrow><annotation encoding="application/x-tex">\text{KV memory reduction factor}=\frac{H_Q}{H_{KV}}=\frac{32}{8}=\boxed{4\times}. </annotation></semantics></math></p>
+<h2 id="why-shared-kv-does-not-make-query-heads-identical">Why shared K/V does not make Query heads identical</h2>
+<p>Consider a toy <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>D</mi><mo>=</mo><mn>2</mn></mrow><annotation encoding="application/x-tex">D=2</annotation></semantics></math> example with shared Keys <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>K</mi><mn>1</mn></msub><mo>=</mo><mrow><mo stretchy="true" form="prefix">[</mo><mn>1</mn><mo>,</mo><mn>0</mn><mo stretchy="true" form="postfix">]</mo></mrow></mrow><annotation encoding="application/x-tex">K_1=[1,0]</annotation></semantics></math>, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>K</mi><mn>2</mn></msub><mo>=</mo><mrow><mo stretchy="true" form="prefix">[</mo><mn>0</mn><mo>,</mo><mn>1</mn><mo stretchy="true" form="postfix">]</mo></mrow></mrow><annotation encoding="application/x-tex">K_2=[0,1]</annotation></semantics></math>. Two Query heads have different vectors <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>Q</mi><mi>A</mi></msub><mo>=</mo><mrow><mo stretchy="true" form="prefix">[</mo><mn>2</mn><mo>,</mo><mn>0</mn><mo stretchy="true" form="postfix">]</mo></mrow></mrow><annotation encoding="application/x-tex">Q_A=[2,0]</annotation></semantics></math> and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>Q</mi><mi>B</mi></msub><mo>=</mo><mrow><mo stretchy="true" form="prefix">[</mo><mn>0</mn><mo>,</mo><mn>2</mn><mo stretchy="true" form="postfix">]</mo></mrow></mrow><annotation encoding="application/x-tex">Q_B=[0,2]</annotation></semantics></math>. Their scaled scores are <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mo stretchy="true" form="prefix">[</mo><msqrt><mn>2</mn></msqrt><mo>,</mo><mn>0</mn><mo stretchy="true" form="postfix">]</mo></mrow><annotation encoding="application/x-tex">[\sqrt2,0]</annotation></semantics></math> and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mo stretchy="true" form="prefix">[</mo><mn>0</mn><mo>,</mo><msqrt><mn>2</mn></msqrt><mo stretchy="true" form="postfix">]</mo></mrow><annotation encoding="application/x-tex">[0,\sqrt2]</annotation></semantics></math>, respectively. Softmax therefore produces different attention distributions: approximately <strong>[0.804, 0.196]</strong> and <strong>[0.196, 0.804]</strong>. Both heads can use the <strong>same cached Keys and Values</strong> yet output different weighted Value combinations.</p>
+<figure>
+<img src="/notes/attention-kv-cache-gqa/figures/11_shared_kv_distinct_weights.png" alt="Figure 11. Two independent Query heads use one shared KV head but generate different attention weights." />
+<figcaption aria-hidden="true">Figure 11. Two independent Query heads use one shared KV head but generate different attention weights.</figcaption>
+</figure>
+<p><em>Figure 11. Two independent Query heads use one shared KV head but generate different attention weights.</em> For the earlier 32-layer, 8K-token example:</p>
+<figure>
+<img src="/notes/attention-kv-cache-gqa/figures/12_kv_memory_comparison.png" alt="Figure 12. Theoretical logical KV storage for MHA, GQA and MQA under equal layer, head-dimension, context and precision assumptions." />
+<figcaption aria-hidden="true">Figure 12. Theoretical logical KV storage for MHA, GQA and MQA under equal layer, head-dimension, context and precision assumptions.</figcaption>
+</figure>
+<p><em>Figure 12. Theoretical logical KV storage for MHA, GQA and MQA under equal layer, head-dimension, context and precision assumptions.</em> - <strong>MHA, 32 KV heads:</strong> 4 GiB / sequence. - <strong>GQA, 8 KV heads:</strong> 1 GiB / sequence. - <strong>MQA, 1 KV head:</strong> 128 MiB / sequence.</p>
+<p>These figures are <strong>KV storage reductions</strong>, not promises of 4× or 32× overall decoding speed. Actual speed is affected by model-weight traffic, attention kernels, bandwidth, batching, compute, quantization and scheduler behavior.</p>
+<p>GQA is fundamentally a <strong>model architecture and checkpoint parameterization</strong>. You cannot simply change <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>H</mi><mrow><mi>K</mi><mi>V</mi></mrow></msub><annotation encoding="application/x-tex">H_{KV}</annotation></semantics></math> of an already trained MHA checkpoint at runtime and expect equivalent outputs. Converting checkpoints requires suitable modification of projections and typically additional adaptation/training; the original GQA paper presents an uptraining recipe.</p>
+<h1 id="why-the-kv-cache-influences-inference-throughput">Why the KV cache influences inference throughput</h1>
+<p><strong>Benefits of caching:</strong> It removes repeated computation of past-token hidden states and their Q/K/V projections on each autoregressive step. It is therefore essential to efficient token-by-token generation.</p>
+<p><strong>Its remaining cost:</strong> At each step, the current Query still needs attention over accessible past K/V positions, so their representations are repeatedly consumed. Depending on the workload, this results in substantial HBM traffic. Larger contexts and more concurrent sequences mean more live KV data.</p>
+<p><strong>What GQA changes:</strong> It stores and reads fewer distinct K/V head vectors for a given token history. This improves feasible context/concurrency and may reduce memory-bandwidth pressure during decode. It does not shrink the number of historical positions or eliminate attention arithmetic.</p>
+<p>Related methods target different costs:</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th style="text-align: left;">Technique</th>
+<th style="text-align: left;">Primary mechanism</th>
+<th style="text-align: left;">What it does <strong>not</strong> mean</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">GQA / MQA</td>
+<td style="text-align: left;">Fewer distinct K/V heads</td>
+<td style="text-align: left;">Not runtime-only lossless compression of arbitrary MHA weights</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">KV quantization</td>
+<td style="text-align: left;">Fewer bytes per K/V element</td>
+<td style="text-align: left;">Not fewer token positions by itself</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">PagedAttention</td>
+<td style="text-align: left;">KV cache allocation, paging, and potential block sharing</td>
+<td style="text-align: left;">Does not reduce the theoretical number of K/V values in a full-history attention model</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">FlashAttention</td>
+<td style="text-align: left;">Tiled, IO-aware exact attention computation</td>
+<td style="text-align: left;">Does not make persistent decode KV storage disappear</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">Prefix caching</td>
+<td style="text-align: left;">Reuse K/V for identical cached prefixes</td>
+<td style="text-align: left;">Not automatic reuse for unrelated prefixes</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">KV offload / eviction</td>
+<td style="text-align: left;">Move or release GPU-resident KV</td>
+<td style="text-align: left;">May add transfer cost or require recomputation</td>
+</tr>
+</tbody>
+</table>
+<h1 id="prefilldecode-disaggregation-and-kv-transfer">Prefill/decode disaggregation and KV transfer</h1>
+<p>In a disaggregated design, one accelerator performs prefill while a different accelerator performs subsequent decode. Instead of transferring the prompt Queries or every hidden state, the decode worker generally needs <strong>compatible per-layer prompt K/V tensors</strong>, together with essential metadata (such as positions, layer/head mapping, data type and layout). The decode worker then computes new Q/K/V tensors for later tokens.</p>
+<figure>
+<img src="/notes/attention-kv-cache-gqa/figures/13_disaggregated.png" alt="Figure 13. Conceptual handoff of per-layer KV data between prefill and decode runtimes." />
+<figcaption aria-hidden="true">Figure 13. Conceptual handoff of per-layer KV data between prefill and decode runtimes.</figcaption>
+</figure>
+<p><em>Figure 13. Conceptual handoff of per-layer KV data between prefill and decode runtimes.</em> For the 8K-token example, GQA reduces the <strong>logical</strong> KV payload from 4 GiB (32 KV heads) to 1 GiB (8 KV heads), provided other parameters are held equal. Real transfer volume and latency may differ due to data distribution across devices, transport framing, paging, dtype conversion, transfer overlap and runtime requirements.</p>
+<p><strong>Cross-vendor caveat (e.g., NVIDIA prefill → another accelerator’s decode):</strong> Sharing architecture and the name “KV cache” is not enough to guarantee a working handoff. Both runtimes must agree on model weights, layer/head semantics, RoPE positional conventions, KV layout/order, dtype/quantization/scales, and how cache tokens map to physical buffers. Support for actual transfer/import APIs must be established separately.</p>
+<h1 id="practical-shape-checking-example">Practical shape-checking example</h1>
+<p>The following pseudocode is <strong>shape-oriented</strong>, not a full implementation (normalization, RoPE, causal masking, fused kernels, residuals and batch axes are omitted):</p>
+<pre class="python"><code># One decoder layer; illustrative GQA dimensions
+S, d_model, Hq, Hkv, D = 3, 4096, 32, 8, 128
+X = hidden_states                 # [S, 4096]
+Q = (X @ Wq).reshape(S, Hq, D)    # [3, 32, 128]
+K = (X @ Wk).reshape(S, Hkv, D)   # [3,  8, 128]
+V = (X @ Wv).reshape(S, Hkv, D)   # [3,  8, 128]
+
+# On prefill: per-head attention with a causal mask; save K, V.
+cache_K, cache_V = K, V
+
+# At a later decode step, X_new represents ONE current token.
+q_new = (X_new @ Wq).reshape(1, Hq, D)
+k_new = (X_new @ Wk).reshape(1, Hkv, D)
+v_new = (X_new @ Wv).reshape(1, Hkv, D)
+cache_K = append(cache_K, k_new)  # [4, 8, 128]
+cache_V = append(cache_V, v_new)  # [4, 8, 128]
+
+# Each q_new head h attends to KV head (h // 4).
+# In optimized GQA, shared KV are NOT stored four times.</code></pre>
+<h2 id="eight-correctness-checks">Eight correctness checks</h2>
+<ol type="1">
+<li><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>Q</mi><mo>=</mo><mi>X</mi><msub><mi>W</mi><mi>Q</mi></msub></mrow><annotation encoding="application/x-tex">Q=XW_Q</annotation></semantics></math> is <strong><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>S</mi><mo>×</mo><mrow><mo stretchy="true" form="prefix">(</mo><msub><mi>H</mi><mi>Q</mi></msub><mi>D</mi><mo stretchy="true" form="postfix">)</mo></mrow></mrow><annotation encoding="application/x-tex">S\times(H_QD)</annotation></semantics></math></strong> in the example, before head reshaping.</li>
+<li>One Query head is <strong><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>S</mi><mo>×</mo><mi>D</mi></mrow><annotation encoding="application/x-tex">S\times D</annotation></semantics></math></strong> after reshaping.</li>
+<li>One GQA K/V head is also <strong><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>S</mi><mo>×</mo><mi>D</mi></mrow><annotation encoding="application/x-tex">S\times D</annotation></semantics></math></strong>, but there are fewer KV heads.</li>
+<li>The attention score matrix for one Query head has shape <strong>query length × accessible key length</strong>.</li>
+<li>During causal prefill, future positions are masked.</li>
+<li>Decode reuses <strong>past K/V</strong>, not past Q, and appends <strong>new K/V</strong>.</li>
+<li><strong>Every transformer layer</strong> maintains its own KV content.</li>
+<li>A fourfold KV-memory reduction is <strong>not</strong> necessarily a fourfold reduction in TPOT.</li>
+</ol>
+<h1 id="glossary-and-notation">Glossary and notation</h1>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th style="text-align: left;">Term</th>
+<th style="text-align: left;">Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">Token</td>
+<td style="text-align: left;">Unit of text represented by a tokenizer ID; not necessarily a whole word</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">Embedding / hidden state</td>
+<td style="text-align: left;">Learned dense vector representing a token at a model stage</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>d</mi><mrow><mi>m</mi><mi>o</mi><mi>d</mi><mi>e</mi><mi>l</mi></mrow></msub><annotation encoding="application/x-tex">d_{model}</annotation></semantics></math></td>
+<td style="text-align: left;">Hidden-state width, e.g. 4,096</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>D</mi><annotation encoding="application/x-tex">D</annotation></semantics></math> / head dimension</td>
+<td style="text-align: left;">Number of components in one Q, K or V head, e.g. 128</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>H</mi><mi>Q</mi></msub><annotation encoding="application/x-tex">H_Q</annotation></semantics></math></td>
+<td style="text-align: left;">Number of independent Query heads</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>H</mi><mrow><mi>K</mi><mi>V</mi></mrow></msub><annotation encoding="application/x-tex">H_{KV}</annotation></semantics></math></td>
+<td style="text-align: left;">Number of Key heads and corresponding Value heads</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>S</mi><annotation encoding="application/x-tex">S</annotation></semantics></math></td>
+<td style="text-align: left;">Sequence length or cached token count</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>L</mi><annotation encoding="application/x-tex">L</annotation></semantics></math></td>
+<td style="text-align: left;">Number of transformer layers</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>B</mi><annotation encoding="application/x-tex">B</annotation></semantics></math></td>
+<td style="text-align: left;">Number of concurrently cached sequences</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;"><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>P</mi><annotation encoding="application/x-tex">P</annotation></semantics></math></td>
+<td style="text-align: left;">Bytes per cached K/V element</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">KV cache</td>
+<td style="text-align: left;">Per-layer stored Key and Value activations for past positions</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">Prefill</td>
+<td style="text-align: left;">Initial processing of supplied prompt tokens</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">Decode</td>
+<td style="text-align: left;">Subsequent autoregressive processing of generated tokens</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">TTFT</td>
+<td style="text-align: left;">Time to first token</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">TPOT</td>
+<td style="text-align: left;">Time per output token after the first token</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">MHA / GQA / MQA</td>
+<td style="text-align: left;">Multi-Head / Grouped-Query / Multi-Query Attention</td>
+</tr>
+</tbody>
+</table>
+<h1 id="references-and-further-reading">References and further reading</h1>
+<ol type="1">
+<li>Vaswani et al., <strong>Attention Is All You Need</strong> (2017). Original scaled dot-product and multi-head attention formulation. <a href="https://arxiv.org/abs/1706.03762" class="uri">https://arxiv.org/abs/1706.03762</a></li>
+<li>Ainslie et al., <strong>GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints</strong> (EMNLP 2023). GQA architecture and checkpoint adaptation. <a href="https://aclanthology.org/2023.emnlp-main.298/" class="uri">https://aclanthology.org/2023.emnlp-main.298/</a></li>
+<li>Kwon et al., <strong>Efficient Memory Management for Large Language Model Serving with PagedAttention</strong> (SOSP 2023). KV-cache blocks, memory management, and vLLM serving. <a href="https://doi.org/10.1145/3600006.3613165" class="uri">https://doi.org/10.1145/3600006.3613165</a></li>
+<li>Dao et al., <strong>FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness</strong> (NeurIPS 2022). IO-aware attention kernels. <a href="https://papers.nips.cc/paper_files/paper/2022/hash/67d57c32e20fd0a7a302cb81d36e40d5-Abstract-Conference.html" class="uri">https://papers.nips.cc/paper_files/paper/2022/hash/67d57c32e20fd0a7a302cb81d36e40d5-Abstract-Conference.html</a></li>
+</ol>
+<p><em>Scope note:</em> Numerical attention weights and the model dimensions in this tutorial are worked examples. Actual models may use distinct head sizes, local/sliding-window attention, RoPE variants, MLA, special cache layouts, or KV quantization; adapt the equations to the model architecture and runtime implementation being investigated.</p>

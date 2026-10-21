@@ -1,0 +1,35 @@
+---
+import Base from '../../layouts/Base.astro';
+import articleHtml from '../../content/attention-kv-cache-gqa.html?raw';
+import '../../styles/attention-reference.css';
+---
+<Base
+  title="Transformer Attention, KV Cache, Prefill, Decode & GQA"
+  description="A worked illustrated technical reference on Transformer self-attention, Q/K/V projections, prefill, decode, KV caching and grouped-query attention."
+>
+  <div class="note-crumb"><a href="/notes/">Technical notes</a> <span aria-hidden="true">/</span> LLM inference</div>
+  <div class="attention-note-heading">
+    <div class="eyebrow">LLM SYSTEMS · TECHNICAL REFERENCE</div>
+    <h1>Transformer Attention, KV Cache, Prefill, Decode & GQA</h1>
+  </div>
+  <details class="attention-toc" open>
+    <summary>On this page</summary>
+    <nav aria-label="Table of contents">
+    <a href="#reading-map">Reading map</a>
+    <a href="#tokens-embeddings-and-hidden-states">Tokens, embeddings, and hidden states</a>
+    <a href="#the-role-of-attention-within-one-transformer-layer">The role of attention within one transformer layer</a>
+    <a href="#scaled-dot-product-causal-attention">Scaled dot-product causal attention</a>
+    <a href="#why-causal-attention-enables-a-kv-cache">Why causal attention enables a KV cache</a>
+    <a href="#prefill-and-decode-a-precise-timeline">Prefill and decode: a precise timeline</a>
+    <a href="#kv-cache-memory-derive-it-from-first-principles">KV-cache memory: derive it from first principles</a>
+    <a href="#multi-head-grouped-query-and-multi-query-attention">Multi-head, grouped-query, and multi-query attention</a>
+    <a href="#why-the-kv-cache-influences-inference-throughput">Why the KV cache influences inference throughput</a>
+    <a href="#prefilldecode-disaggregation-and-kv-transfer">Prefill/decode disaggregation and KV transfer</a>
+    <a href="#practical-shape-checking-example">Practical shape-checking example</a>
+    <a href="#glossary-and-notation">Glossary and notation</a>
+    <a href="#references-and-further-reading">References and further reading</a>
+    </nav>
+  </details>
+  <article class="attention-reference" set:html={articleHtml} />
+  <p class="note-end"><a href="/notes/">← All technical notes</a></p>
+</Base>
