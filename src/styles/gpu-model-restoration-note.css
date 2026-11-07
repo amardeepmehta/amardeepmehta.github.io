@@ -28,3 +28,14 @@
 .note-crumb span { padding:0 6px; }
 .note-end { margin-top:35px; padding-top:22px; border-top:1px solid #e7ebee; font-size:13px; }
 @media (max-width:640px) { .restoration-toc ol { columns:1; } .restoration-note h2 { font-size:22px; } }
+
+/* Accessible, responsive research figures (schematic, not measured data). */
+.restoration-note .restoration-figure { margin: 29px 0 37px; }
+.restoration-note .restoration-figure img { display:block; width:100%; height:auto; max-width:100%; border:1px solid #dbe5eb; border-radius:12px; background:#f8fbfd; }
+.restoration-note .restoration-figure figcaption { margin-top:11px; color:#51616d; font-size:13px; line-height:1.7; }
+.restoration-note .restoration-figure figcaption strong { color:#2c3c49; }
+.restoration-note .restoration-figure figcaption span { color:#71828e; white-space:normal; }
+@media(max-width:640px){
+  .restoration-note .restoration-figure { margin:24px 0 30px; }
+  .restoration-note .restoration-figure figcaption { font-size:12px; }
+}

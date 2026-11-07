@@ -11,6 +11,10 @@
 <li><strong>Request-visible recovery time:</strong> When a request arriving around the restoration boundary can produce its first token.</li>
 </ul>
 <p>Optimizing one clock can leave the other two nearly unchanged. I therefore treat end-to-end recovery as the principal outcome and use lower-level timings to explain it.</p>
+<figure class="restoration-figure" id="figure-1">
+  <img src="/notes/gpu-model-restoration-lessons/figures/01-restoration-critical-path.svg" alt="Figure 1: Different completion points matter: weight-transfer completion, model readiness, and first-token availability are not the same timestamp." width="900" height="354" loading="lazy" decoding="async" />
+  <figcaption><strong>Figure 1.</strong> Different completion points matter: weight-transfer completion, model readiness, and first-token availability are not the same timestamp. <span>Conceptual illustration — not measured results.</span></figcaption>
+</figure>
 <h2 id="2-tensor-merging-is-a-granularity-problem-not-just-a-memcpy-problem">2. Tensor merging is a granularity problem, not just a memcpy problem</h2>
 <p>LLM weights are represented by many tensors, sometimes backed by numerous allocation or copy regions. A naïve restoration path may submit many small transfers. Even if the aggregate byte count is fixed, copy submission, driver work, synchronization, and per-region bookkeeping can become significant.</p>
 <p><strong>Tensor merging</strong> or transfer coalescing aims to reduce that fragmentation. Eligible regions can be grouped into larger transfers, provided that storage layout, destination mapping, alignment, tensor identity, and lifetime requirements remain correct. The benefit is not guaranteed: a larger copy can be more efficient, yet it may delay the point at which an individual layer becomes ready.</p>
@@ -21,6 +25,10 @@
 <li>A useful grouping policy respects the order in which weights are consumed, not merely their positions in a file or allocation table.</li>
 </ul>
 <p>Hold transferred bytes and layout constant where possible; vary granularity while measuring API cost and tensor readiness. Counting memcpy calls alone is not enough.</p>
+<figure class="restoration-figure" id="figure-2">
+  <img src="/notes/gpu-model-restoration-lessons/figures/02-tensor-merging-granularity.svg" alt="Figure 2: Coalescing may reduce submission overhead, but changing copy granularity also affects when individual layers can be considered ready." width="900" height="358" loading="lazy" decoding="async" />
+  <figcaption><strong>Figure 2.</strong> Coalescing may reduce submission overhead, but changing copy granularity also affects when individual layers can be considered ready. <span>Conceptual illustration — not measured results.</span></figcaption>
+</figure>
 <h2 id="3-prefetching-only-helps-when-it-hides-work-from-the-critical-path">3. Prefetching only helps when it hides work from the critical path</h2>
 <p>Prefetching starts a transfer before its consumer needs the data. For a layer-wise execution sequence, the idealized picture is simple: while layer <em>i</em> computes, weights for layer <em>i + 1</em> arrive. If the next layer's transfer finishes before the current computation does, its copy is hidden. Otherwise the difference becomes a stall.</p>
 <p>For an illustrative single-layer window, with no earlier prefetch head start:</p>
@@ -28,12 +36,17 @@
 <p>This simplified model excludes launch overhead, dependencies, memory pressure, and resource contention. The first usable layer's transfer can remain exposed even when later transfers overlap well.</p>
 <p>CUDA supports asynchronous copies and concurrent copy/compute on capable devices, but <a href="https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/">NVIDIA's best-practices guidance</a> makes the prerequisites clear: effective H2D overlap generally requires appropriately pinned host memory, suitable streams, and hardware support. An API returning asynchronously is <strong>not evidence</strong> that its data is already usable. The consumer needs correct event or stream dependencies, and the staging memory must remain valid until the transfer completes.</p>
 <p>There is another systems constraint: prefetching requires a runtime that can admit work when <em>the necessary subset</em> of weights is ready. A runtime that insists on an all-at-once wake cannot realize layer-wise inference overlap merely by launching copies earlier. Readiness semantics are part of the design.</p>
+<figure class="restoration-figure" id="figure-3">
+  <img src="/notes/gpu-model-restoration-lessons/figures/03-prefetch-overlap.svg" alt="Figure 3: Next-layer prefetch overlaps H2D transfers with current-layer computation; remaining transfer after compute completion is an exposed stall." width="900" height="375" loading="lazy" decoding="async" />
+  <figcaption><strong>Figure 3.</strong> Next-layer prefetch overlaps H2D transfers with current-layer computation; remaining transfer after compute completion is an exposed stall. <span>Conceptual illustration — not measured results.</span></figcaption>
+</figure>
 <h2 id="4-multipath-transfers-trade-additional-bandwidth-opportunities-for-coordination">4. Multipath transfers trade additional bandwidth opportunities for coordination</h2>
 <p>On a multi-GPU server, one can consider more than a direct host-to-target path. A conceptual alternative stages part of the data on a second GPU and then forwards it to the target over a peer-to-peer link, potentially NVLink where supported. The paths are:</p>
-<pre><code class="language-text">Direct:  Host memory --------------------&gt; Target GPU
-Relay:   Host memory --&gt; Helper GPU -----&gt; Target GPU
-                                     P2P
-</code></pre>
+<figure class="restoration-figure" id="figure-4">
+  <img src="/notes/gpu-model-restoration-lessons/figures/04-multipath-topology.svg" alt="Figure 4: A helper GPU can relay H2D data to a target via a peer link, but the direct and relay paths may share host and GPU bottlenecks." width="900" height="346" loading="lazy" decoding="async" />
+  <figcaption><strong>Figure 4.</strong> A helper GPU can relay H2D data to a target via a peer link, but the direct and relay paths may share host and GPU bottlenecks. <span>Conceptual illustration — not measured results.</span></figcaption>
+</figure>
+
 <p>This can create new opportunities for concurrency, but it is <strong>not</strong> equivalent to doubling usable bandwidth. The direct and relayed paths may contend for host-memory bandwidth, PCIe root complexes, copy engines, target memory bandwidth, or the helper GPU's resources. The relay also adds another data movement step and its own synchronization cost.</p>
 <p>Topology matters. Two GPUs linked by NVLink may still share a CPU socket or host-side bottleneck. NUMA placement can affect how efficiently host buffers reach each device. A peer link's advertised bandwidth does not predict the end-to-end throughput of a host-to-relay-to-target chain.</p>
 <p>Most importantly, the helper GPU may be serving work of its own. An optimization that shortens restoration while degrading another request's latency is not necessarily a win for the system. The right comparison includes both the recovered model and any foreground workload affected by the relay.</p>
@@ -48,6 +61,10 @@ Relay:   Host memory --&gt; Helper GPU -----&gt; Target GPU
 <li><strong>Whose latency is being optimized?</strong> A restoration benchmark, the first recovered request, or overall serving quality may give different answers.</li>
 </ol>
 <p>That is why a bandwidth microbenchmark can outperform an actual serving transition.</p>
+<figure class="restoration-figure" id="figure-5">
+  <img src="/notes/gpu-model-restoration-lessons/figures/05-helper-interference.svg" alt="Figure 5: Relay transfers can help when the helper is lightly loaded, but contention can increase latency for workloads already running on that GPU." width="900" height="360" loading="lazy" decoding="async" />
+  <figcaption><strong>Figure 5.</strong> Relay transfers can help when the helper is lightly loaded, but contention can increase latency for workloads already running on that GPU. <span>Conceptual illustration — not measured results.</span></figcaption>
+</figure>
 <h2 id="6-measure-the-full-transition-then-isolate-the-bottleneck">6. Measure the full transition, then isolate the bottleneck</h2>
 <p>My preferred measurement sequence starts with the externally visible event and works inward. First define the precise interval: when a restore is requested, when the model becomes eligible for inference, and when the first token is observed. Then profile memory copies, allocation or mapping work, host submission gaps, and GPU execution inside that interval.</p>
 <p>A disciplined comparison should include:</p>
@@ -61,6 +78,10 @@ Relay:   Host memory --&gt; Helper GPU -----&gt; Target GPU
 </ul>
 <p>Profilers can perturb timing. Use lightweight markers, repeated runs, and alternating baseline/candidate measurements to detect instrumentation effects and machine drift.</p>
 <p>Finally, avoid adding independently measured stage durations unless they were actually serial. If copies, remapping, and compute overlap, their individual timings need a dependency-aware timeline rather than a simple sum.</p>
+<figure class="restoration-figure" id="figure-6">
+  <img src="/notes/gpu-model-restoration-lessons/figures/06-profiling-timeline.svg" alt="Figure 6: A dependency-aware profiling timeline aligns host-side operations, GPU transfers, synchronization, model readiness, and first-token delivery." width="900" height="386" loading="lazy" decoding="async" />
+  <figcaption><strong>Figure 6.</strong> A dependency-aware profiling timeline aligns host-side operations, GPU transfers, synchronization, model readiness, and first-token delivery. <span>Conceptual illustration — not measured results.</span></figcaption>
+</figure>
 <h2 id="7-the-most-useful-takeaway">7. The most useful takeaway</h2>
 <p>A model is not restored merely because the last byte has crossed a link. It is restored when the runtime has established the data and execution dependencies needed to serve correctly—and a recovery optimization matters when it improves that point without unacceptable side effects elsewhere.</p>
 <p>Tensor merging asks how much control overhead fragmentation creates. Prefetching asks how much transfer time can be moved off the critical path. Multipath asks whether other available data paths can help without introducing damaging contention. The strongest engineering approach is to answer these questions with a shared end-to-end timeline, then optimize the part that remains exposed.</p>
