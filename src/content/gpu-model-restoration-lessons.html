@@ -1,0 +1,75 @@
+<p>When an LLM serving system temporarily releases GPU memory, getting the model ready again may be more expensive than the inference request that follows. The obvious place to look is host-to-device (H2D) bandwidth: the weights live in host memory, so perhaps transferring them faster is the answer.</p>
+<p>That explanation is incomplete. A successful restoration has to make the right bytes available at the right addresses, satisfy ordering dependencies, and leave the runtime in a state where it can execute safely. The relevant performance question is therefore not simply <strong>“How many gigabytes per second can we copy?”</strong> It is <strong>“What remains on the critical path to a usable model?”</strong></p>
+<p>This note considers tensor-transfer granularity, prefetching, and alternative GPU data paths through three lenses: <em>readiness</em>, <em>overlap</em>, and <em>interference</em>.</p>
+<h2 id="1-define-restoration-before-trying-to-accelerate-it">1. Define restoration before trying to accelerate it</h2>
+<p>Loading a checkpoint may involve storage I/O and tensor construction. In an in-memory restore, a runtime may already have a host-memory copy of weights and needs to make them usable on a GPU again. For example, <a href="https://docs.vllm.ai/en/latest/features/sleep_mode/">vLLM's sleep mode</a> can retain a CPU backup while releasing GPU memory.</p>
+<p>The observable wake-up interval is not necessarily identical to the duration of H2D copies. Depending on the runtime, it can also involve memory allocation or remapping, bookkeeping, synchronization, and execution-state preparation. Some of these stages are serial; others can overlap.</p>
+<p>Measure three different clocks:</p>
+<ul>
+<li><strong>Transfer time:</strong> When the relevant H2D operations actually execute and complete.</li>
+<li><strong>Model-ready time:</strong> When the runtime can safely use the restored weights.</li>
+<li><strong>Request-visible recovery time:</strong> When a request arriving around the restoration boundary can produce its first token.</li>
+</ul>
+<p>Optimizing one clock can leave the other two nearly unchanged. I therefore treat end-to-end recovery as the principal outcome and use lower-level timings to explain it.</p>
+<h2 id="2-tensor-merging-is-a-granularity-problem-not-just-a-memcpy-problem">2. Tensor merging is a granularity problem, not just a memcpy problem</h2>
+<p>LLM weights are represented by many tensors, sometimes backed by numerous allocation or copy regions. A naïve restoration path may submit many small transfers. Even if the aggregate byte count is fixed, copy submission, driver work, synchronization, and per-region bookkeeping can become significant.</p>
+<p><strong>Tensor merging</strong> or transfer coalescing aims to reduce that fragmentation. Eligible regions can be grouped into larger transfers, provided that storage layout, destination mapping, alignment, tensor identity, and lifetime requirements remain correct. The benefit is not guaranteed: a larger copy can be more efficient, yet it may delay the point at which an individual layer becomes ready.</p>
+<p>The key tension is between <strong>transfer efficiency</strong> and <strong>readiness granularity</strong>:</p>
+<ul>
+<li>Very small regions expose early readiness but create substantial control-plane work.</li>
+<li>Very large merged regions amortize overhead but may force consumers to wait for bytes they do not yet need.</li>
+<li>A useful grouping policy respects the order in which weights are consumed, not merely their positions in a file or allocation table.</li>
+</ul>
+<p>Hold transferred bytes and layout constant where possible; vary granularity while measuring API cost and tensor readiness. Counting memcpy calls alone is not enough.</p>
+<h2 id="3-prefetching-only-helps-when-it-hides-work-from-the-critical-path">3. Prefetching only helps when it hides work from the critical path</h2>
+<p>Prefetching starts a transfer before its consumer needs the data. For a layer-wise execution sequence, the idealized picture is simple: while layer <em>i</em> computes, weights for layer <em>i + 1</em> arrive. If the next layer's transfer finishes before the current computation does, its copy is hidden. Otherwise the difference becomes a stall.</p>
+<p>For an illustrative single-layer window, with no earlier prefetch head start:</p>
+<p><strong>Exposed wait ≈ max(0, next-layer transfer time − available compute time).</strong></p>
+<p>This simplified model excludes launch overhead, dependencies, memory pressure, and resource contention. The first usable layer's transfer can remain exposed even when later transfers overlap well.</p>
+<p>CUDA supports asynchronous copies and concurrent copy/compute on capable devices, but <a href="https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/">NVIDIA's best-practices guidance</a> makes the prerequisites clear: effective H2D overlap generally requires appropriately pinned host memory, suitable streams, and hardware support. An API returning asynchronously is <strong>not evidence</strong> that its data is already usable. The consumer needs correct event or stream dependencies, and the staging memory must remain valid until the transfer completes.</p>
+<p>There is another systems constraint: prefetching requires a runtime that can admit work when <em>the necessary subset</em> of weights is ready. A runtime that insists on an all-at-once wake cannot realize layer-wise inference overlap merely by launching copies earlier. Readiness semantics are part of the design.</p>
+<h2 id="4-multipath-transfers-trade-additional-bandwidth-opportunities-for-coordination">4. Multipath transfers trade additional bandwidth opportunities for coordination</h2>
+<p>On a multi-GPU server, one can consider more than a direct host-to-target path. A conceptual alternative stages part of the data on a second GPU and then forwards it to the target over a peer-to-peer link, potentially NVLink where supported. The paths are:</p>
+<pre><code class="language-text">Direct:  Host memory --------------------&gt; Target GPU
+Relay:   Host memory --&gt; Helper GPU -----&gt; Target GPU
+                                     P2P
+</code></pre>
+<p>This can create new opportunities for concurrency, but it is <strong>not</strong> equivalent to doubling usable bandwidth. The direct and relayed paths may contend for host-memory bandwidth, PCIe root complexes, copy engines, target memory bandwidth, or the helper GPU's resources. The relay also adds another data movement step and its own synchronization cost.</p>
+<p>Topology matters. Two GPUs linked by NVLink may still share a CPU socket or host-side bottleneck. NUMA placement can affect how efficiently host buffers reach each device. A peer link's advertised bandwidth does not predict the end-to-end throughput of a host-to-relay-to-target chain.</p>
+<p>Most importantly, the helper GPU may be serving work of its own. An optimization that shortens restoration while degrading another request's latency is not necessarily a win for the system. The right comparison includes both the recovered model and any foreground workload affected by the relay.</p>
+<h2 id="5-why-these-three-techniques-interact">5. Why these three techniques interact</h2>
+<p>Tensor merging, prefetching, and multipath transfer should not be evaluated as independent switches. Their effects can reinforce or cancel one another.</p>
+<p>Merging may make a transfer engine more efficient, but larger units of work can reduce the precision of prefetch scheduling. Prefetching can hide copy time, but only while there is sufficient compute to cover the copy and enough device memory for prefetched data. Multipath may reduce a transfer bottleneck, but it can also introduce a competing use of memory or copy resources that erases some of the overlap.</p>
+<p>The resulting optimization problem is about <em>placement of work on a timeline</em>, not maximizing a single counter. I find four questions especially useful:</p>
+<ol>
+<li><strong>What is the next operation that cannot proceed?</strong> Identify its exact data and synchronization dependencies.</li>
+<li><strong>Which operations could run earlier or concurrently?</strong> Distinguish genuine independence from an assumed overlap.</li>
+<li><strong>What shared resource would that concurrency consume?</strong> Include host memory, PCIe, NVLink, GPU copy engines, and compute.</li>
+<li><strong>Whose latency is being optimized?</strong> A restoration benchmark, the first recovered request, or overall serving quality may give different answers.</li>
+</ol>
+<p>That is why a bandwidth microbenchmark can outperform an actual serving transition.</p>
+<h2 id="6-measure-the-full-transition-then-isolate-the-bottleneck">6. Measure the full transition, then isolate the bottleneck</h2>
+<p>My preferred measurement sequence starts with the externally visible event and works inward. First define the precise interval: when a restore is requested, when the model becomes eligible for inference, and when the first token is observed. Then profile memory copies, allocation or mapping work, host submission gaps, and GPU execution inside that interval.</p>
+<p>A disciplined comparison should include:</p>
+<ul>
+<li><strong>Identical work:</strong> Same model, weight bytes, prompt shape, serving configuration, and GPU memory state.</li>
+<li><strong>Controlled memory conditions:</strong> Record pinned versus pageable host buffers, NUMA affinity, transfer sizes, and source-buffer reuse.</li>
+<li><strong>Topology evidence:</strong> Capture GPU interconnect and peer-access information instead of inferring it from GPU model names.</li>
+<li><strong>Concurrent-load tests:</strong> Run both idle and representative loaded conditions; measure interference on other GPU workloads.</li>
+<li><strong>Distributional results:</strong> Report repeated-run medians and tails, not only the best run or peak bandwidth.</li>
+<li><strong>Correctness checks:</strong> Confirm every destination is complete before use and that asynchronous buffer lifetimes and dependencies are valid.</li>
+</ul>
+<p>Profilers can perturb timing. Use lightweight markers, repeated runs, and alternating baseline/candidate measurements to detect instrumentation effects and machine drift.</p>
+<p>Finally, avoid adding independently measured stage durations unless they were actually serial. If copies, remapping, and compute overlap, their individual timings need a dependency-aware timeline rather than a simple sum.</p>
+<h2 id="7-the-most-useful-takeaway">7. The most useful takeaway</h2>
+<p>A model is not restored merely because the last byte has crossed a link. It is restored when the runtime has established the data and execution dependencies needed to serve correctly—and a recovery optimization matters when it improves that point without unacceptable side effects elsewhere.</p>
+<p>Tensor merging asks how much control overhead fragmentation creates. Prefetching asks how much transfer time can be moved off the critical path. Multipath asks whether other available data paths can help without introducing damaging contention. The strongest engineering approach is to answer these questions with a shared end-to-end timeline, then optimize the part that remains exposed.</p>
+<p>For me, that has been the central lesson: <strong>measure readiness and interference, not bandwidth in isolation.</strong></p>
+<hr/>
+<h3>Further reading</h3>
+<ul>
+<li><a href="https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/">NVIDIA CUDA C++ Best Practices Guide — memory transfers and copy/compute overlap</a></li>
+<li><a href="https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/unified-memory.html">NVIDIA CUDA Programming Guide — Unified Memory and data movement considerations</a></li>
+<li><a href="https://docs.vllm.ai/en/latest/features/sleep_mode/">vLLM — Sleep Mode</a></li>
+</ul>
+<p><em>Scope: a conceptual engineering note. It does not report unpublished benchmark results, a specific new scheduling algorithm, or claims of speedup for particular hardware.</em></p>

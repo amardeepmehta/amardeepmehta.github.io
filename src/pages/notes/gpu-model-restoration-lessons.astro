@@ -1,0 +1,31 @@
+---
+import Base from '../../layouts/Base.astro';
+import articleHtml from '../../content/gpu-model-restoration-lessons.html?raw';
+import '../../styles/gpu-model-restoration-note.css';
+---
+<Base
+  title="Lessons from GPU Model Restoration"
+  description="Engineering lessons on tensor merging, prefetching, and multipath H2D transfers for LLM model restoration."
+>
+  <div class="note-crumb"><a href="/notes/">Technical notes</a> <span aria-hidden="true">/</span> GPU systems</div>
+  <header class="restoration-heading">
+    <div class="eyebrow">GPU SYSTEMS · ENGINEERING NOTE</div>
+    <h1>Lessons from GPU Model Restoration: Tensor Merging, Prefetching, and Multipath Transfers</h1>
+    <p class="restoration-deck">Engineering notes on what matters between moving model weights and serving the first token.</p>
+    <p class="restoration-meta">7 November 2026</p>
+  </header>
+  <nav class="restoration-toc" aria-label="Article contents">
+    <div class="restoration-toc-label">On this page</div>
+    <ol>
+      <li><a href="#1-define-restoration-before-trying-to-accelerate-it">Define restoration</a></li>
+      <li><a href="#2-tensor-merging-is-a-granularity-problem-not-just-a-memcpy-problem">Tensor merging</a></li>
+      <li><a href="#3-prefetching-only-helps-when-it-hides-work-from-the-critical-path">Prefetching</a></li>
+      <li><a href="#4-multipath-transfers-trade-additional-bandwidth-opportunities-for-coordination">Multipath transfer</a></li>
+      <li><a href="#5-why-these-three-techniques-interact">Interactions</a></li>
+      <li><a href="#6-measure-the-full-transition-then-isolate-the-bottleneck">Measurement</a></li>
+      <li><a href="#7-the-most-useful-takeaway">Takeaway</a></li>
+    </ol>
+  </nav>
+  <article class="restoration-note" set:html={articleHtml} />
+  <p class="note-end"><a href="/notes/">← All technical notes</a></p>
+</Base>
